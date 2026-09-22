@@ -18,6 +18,25 @@ from PyQt6.QtGui import QTextCursor
 
 from playwright.async_api import async_playwright   
 
+# Cấu hình mã hóa UTF-8 cho console trên Windows để tránh lỗi UnicodeEncodeError
+if sys.platform == "win32":
+    try:
+        if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+def safe_print(msg):
+    try:
+        print(msg)
+    except Exception:
+        try:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
+        except Exception:
+            pass
+
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
 APP_VERSION = "1.0.0"
 GITHUB_REPO_OWNER = "DungAnh1301"
@@ -49,7 +68,7 @@ def check_auto_update(silent=False, parent_widget=None):
                 )
                 if res.stdout.strip():
                     msg = "⚠️ Code local đang chỉnh sửa (uncommitted git). Tạm bỏ qua auto-update để bảo vệ code."
-                    print(msg)
+                    safe_print(msg)
                     if parent_widget and hasattr(parent_widget, "update_log"):
                         parent_widget.update_log(msg)
                     return False
@@ -58,7 +77,7 @@ def check_auto_update(silent=False, parent_widget=None):
 
         if not silent:
             msg = f"🔍 Đang kiểm tra cập nhật từ GitHub ({GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME})..."
-            print(msg)
+            safe_print(msg)
             if parent_widget and hasattr(parent_widget, "update_log"):
                 parent_widget.update_log(msg)
 
@@ -78,7 +97,7 @@ def check_auto_update(silent=False, parent_widget=None):
 
                 if local_hash != remote_hash:
                     msg = "🚀 Phát hiện phiên bản mới trên GitHub! Đang tiến hành cập nhật..."
-                    print(msg)
+                    safe_print(msg)
                     if parent_widget and hasattr(parent_widget, "update_log"):
                         parent_widget.update_log(msg)
 
@@ -93,7 +112,7 @@ def check_auto_update(silent=False, parent_widget=None):
                     with open(current_file, "wb") as f:
                         f.write(remote_code)
 
-                    print("✅ Cập nhật thành công! Đang khởi động lại ứng dụng...")
+                    safe_print("✅ Cập nhật thành công! Đang khởi động lại ứng dụng...")
                     if parent_widget and hasattr(parent_widget, "update_log"):
                         parent_widget.update_log("✅ Đã cập nhật xong! Đang khởi động lại ứng dụng...")
 
@@ -108,18 +127,18 @@ def check_auto_update(silent=False, parent_widget=None):
                 else:
                     if not silent:
                         msg = "✅ Bạn đang dùng phiên bản mới nhất."
-                        print(msg)
+                        safe_print(msg)
                         if parent_widget and hasattr(parent_widget, "update_log"):
                             parent_widget.update_log(msg)
             else:
                 if not silent:
-                    print("⚠️ File tải về từ GitHub không hợp lệ.")
+                    safe_print("⚠️ File tải về từ GitHub không hợp lệ.")
         else:
             if not silent:
-                print(f"⚠️ Không thể kết nối GitHub (HTTP {resp.status_code})")
+                safe_print(f"⚠️ Không thể kết nối GitHub (HTTP {resp.status_code})")
     except Exception as e:
         if not silent:
-            print(f"⚠️ Kiểm tra cập nhật thất bại: {e}. Tiếp tục chạy...")
+            safe_print(f"⚠️ Kiểm tra cập nhật thất bại: {e}. Tiếp tục chạy...")
     return False
    
 
