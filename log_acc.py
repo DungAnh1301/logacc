@@ -112,8 +112,8 @@ def check_auto_update(silent=False, parent_widget=None):
                 with open(current_file, "rb") as f:
                     local_code = f.read()
 
-                local_hash = hashlib.sha256(local_code).hexdigest()
-                remote_hash = hashlib.sha256(remote_code).hexdigest()
+                local_hash = hashlib.sha256(local_code.replace(b'\r\n', b'\n')).hexdigest()
+                remote_hash = hashlib.sha256(remote_code.replace(b'\r\n', b'\n')).hexdigest()
 
                 if local_hash != remote_hash:
                     msg = "🚀 Phát hiện phiên bản mới trên GitHub! Đang tiến hành cập nhật..."
