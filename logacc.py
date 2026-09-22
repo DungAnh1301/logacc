@@ -10,6 +10,7 @@ import subprocess
 import random
 import hashlib
 import shutil
+import importlib.util
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QTextEdit, QLineEdit, QLabel, QSizePolicy, QMessageBox)
@@ -46,34 +47,37 @@ GITHUB_FILE_PATH = "logacc.py"
 def check_auto_update(silent=False, parent_widget=None):
     """
     Tự động kiểm tra bản cập nhật mới nhất từ GitHub.
-    Nếu có bản mới: Tải về, sao lưu file cũ và tự động khởi động lại tool.
+    - Chạy dạng EXE: Tải bản cập nhật về logacc_engine.py cùng thư mục exe và nạp tự động.
+    - Chạy dạng Script: Cập nhật đè file script hiện tại.
     Bypass triệt để cache của GitHub bằng Commit SHA.
     """
     try:
         if "--no-update" in sys.argv:
             return False
 
-        current_file = os.path.abspath(__file__)
-        if not os.path.isfile(current_file):
-            return False
-
-        # Kiểm tra nếu đang trong repo git phát triển có uncommitted changes thì không ghi đè
-        git_dir = os.path.join(os.path.dirname(current_file), ".git")
-        if os.path.exists(git_dir):
-            try:
-                res = subprocess.run(
-                    ["git", "status", "--porcelain", os.path.basename(current_file)],
-                    cwd=os.path.dirname(current_file),
-                    capture_output=True, text=True, timeout=2
-                )
-                if res.stdout.strip():
-                    msg = "⚠️ Code local đang chỉnh sửa (uncommitted git). Tạm bỏ qua auto-update để bảo vệ code."
-                    safe_print(msg)
-                    if parent_widget and hasattr(parent_widget, "update_log"):
-                        parent_widget.update_log(msg)
-                    return False
-            except Exception:
-                pass
+        is_frozen = getattr(sys, "frozen", False)
+        if is_frozen:
+            exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+            target_file = os.path.join(exe_dir, "logacc_engine.py")
+        else:
+            target_file = os.path.abspath(__file__)
+            # Kiểm tra nếu đang trong repo git phát triển có uncommitted changes thì không ghi đè
+            git_dir = os.path.join(os.path.dirname(target_file), ".git")
+            if os.path.exists(git_dir):
+                try:
+                    res = subprocess.run(
+                        ["git", "status", "--porcelain", os.path.basename(target_file)],
+                        cwd=os.path.dirname(target_file),
+                        capture_output=True, text=True, timeout=2
+                    )
+                    if res.stdout.strip():
+                        msg = "⚠️ Code local đang chỉnh sửa (uncommitted git). Tạm bỏ qua auto-update để bảo vệ code."
+                        safe_print(msg)
+                        if parent_widget and hasattr(parent_widget, "update_log"):
+                            parent_widget.update_log(msg)
+                        return False
+                except Exception:
+                    pass
 
         if not silent:
             msg = f"🔍 Đang kiểm tra cập nhật từ GitHub ({GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME})..."
@@ -109,10 +113,12 @@ def check_auto_update(silent=False, parent_widget=None):
             remote_code = resp.content
             # Kiểm tra sơ bộ tính toàn vẹn của file code tải về
             if len(remote_code) > 2000 and b"MainWindow" in remote_code:
-                with open(current_file, "rb") as f:
-                    local_code = f.read()
+                local_code = b""
+                if os.path.isfile(target_file):
+                    with open(target_file, "rb") as f:
+                        local_code = f.read()
 
-                local_hash = hashlib.sha256(local_code.replace(b'\r\n', b'\n')).hexdigest()
+                local_hash = hashlib.sha256(local_code.replace(b'\r\n', b'\n')).hexdigest() if local_code else ""
                 remote_hash = hashlib.sha256(remote_code.replace(b'\r\n', b'\n')).hexdigest()
 
                 if local_hash != remote_hash:
@@ -121,15 +127,16 @@ def check_auto_update(silent=False, parent_widget=None):
                     if parent_widget and hasattr(parent_widget, "update_log"):
                         parent_widget.update_log(msg)
 
-                    # Tạo bản sao lưu an toàn
-                    backup_file = current_file + ".bak"
-                    try:
-                        shutil.copy2(current_file, backup_file)
-                    except Exception:
-                        pass
+                    # Tạo bản sao lưu an toàn nếu file cũ đã tồn tại
+                    if os.path.isfile(target_file):
+                        backup_file = target_file + ".bak"
+                        try:
+                            shutil.copy2(target_file, backup_file)
+                        except Exception:
+                            pass
 
                     # Ghi đè mã nguồn mới
-                    with open(current_file, "wb") as f:
+                    with open(target_file, "wb") as f:
                         f.write(remote_code)
 
                     safe_print("✅ Cập nhật thành công! Đang khởi động lại ứng dụng...")
@@ -137,8 +144,12 @@ def check_auto_update(silent=False, parent_widget=None):
                         parent_widget.update_log("✅ Đã cập nhật xong! Đang khởi động lại ứng dụng...")
 
                     # Khởi động lại tiến trình
-                    args = [a for a in sys.argv if a != "--updated"]
-                    subprocess.Popen([sys.executable, current_file] + args[1:])
+                    args = [a for a in sys.argv[1:] if a != "--updated"]
+                    if is_frozen:
+                        subprocess.Popen([sys.executable] + args)
+                    else:
+                        subprocess.Popen([sys.executable, target_file] + args)
+
                     if parent_widget:
                         QApplication.quit()
                     else:
@@ -1085,11 +1096,33 @@ class MainWindow(QWidget):
         if not has_updated:
             self.btn_update.setEnabled(True)
 
-if __name__ == '__main__':
+def main():
     # Tự động kiểm tra bản cập nhật mới từ GitHub mỗi lần khởi động tool
     check_auto_update(silent=False)
+
+    is_frozen = getattr(sys, "frozen", False)
+    if is_frozen:
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        engine_file = os.path.join(exe_dir, "logacc_engine.py")
+        if os.path.isfile(engine_file):
+            try:
+                safe_print("⚡ Đang nạp phiên bản cập nhật mới nhất từ logacc_engine.py...")
+                spec = importlib.util.spec_from_file_location("logacc_dynamic", engine_file)
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules["logacc_dynamic"] = mod
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "MainWindow"):
+                    app = QApplication(sys.argv)
+                    window = mod.MainWindow()
+                    window.show()
+                    sys.exit(app.exec())
+            except Exception as e:
+                safe_print(f"⚠️ Lỗi nạp engine cập nhật ({e}), chạy phiên bản mặc định...")
 
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
+
+if __name__ == '__main__':
+    main()
