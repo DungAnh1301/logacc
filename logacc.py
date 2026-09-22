@@ -42,12 +42,12 @@ APP_VERSION = "1.0.0"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
-GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/main/{GITHUB_FILE_PATH}"
 
 def check_auto_update(silent=False, parent_widget=None):
     """
     Tự động kiểm tra bản cập nhật mới nhất từ GitHub.
     Nếu có bản mới: Tải về, sao lưu file cũ và tự động khởi động lại tool.
+    Bypass triệt để cache của GitHub bằng Commit SHA.
     """
     try:
         if "--no-update" in sys.argv:
@@ -81,9 +81,29 @@ def check_auto_update(silent=False, parent_widget=None):
             if parent_widget and hasattr(parent_widget, "update_log"):
                 parent_widget.update_log(msg)
 
-        headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
-        update_url = f"{GITHUB_RAW_URL}?t={int(time.time())}"
-        resp = requests.get(update_url, headers=headers, timeout=5)
+        headers = {
+            "User-Agent": "logacc-updater",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+        }
+
+        # 1. Lấy SHA commit mới nhất từ GitHub API để tránh cache của CDN Fastly/Cloudflare
+        latest_sha = None
+        try:
+            api_url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/commits/main"
+            api_resp = requests.get(api_url, headers=headers, timeout=4)
+            if api_resp.status_code == 200:
+                latest_sha = api_resp.json().get("sha")
+        except Exception:
+            pass
+
+        # 2. Xây dựng URL tải file: dùng SHA nếu có, ngược lại dùng main với timestamp
+        if latest_sha:
+            update_url = f"https://raw.githubusercontent.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/{latest_sha}/{GITHUB_FILE_PATH}"
+        else:
+            update_url = f"https://raw.githubusercontent.com/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/main/{GITHUB_FILE_PATH}?t={int(time.time())}"
+
+        resp = requests.get(update_url, headers=headers, timeout=6)
 
         if resp.status_code == 200:
             remote_code = resp.content
