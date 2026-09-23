@@ -227,6 +227,44 @@ def check_auto_update(silent=False, parent_widget=None):
     return False
    
 
+# --- HÀM TỰ ĐỘNG NHẬN DIỆN EMAIL VÀ MẬT KHẨU EMAIL TRONG CHUỖI ĐẦU VÀO ---
+def extract_email_and_password(raw_str):
+    """
+    Tự động nhận diện tài khoản email và mật khẩu email từ chuỗi phân tách bằng dấu '|'.
+    - Dấu hiệu nhận diện email: chứa ký tự '@' và có tên miền (như .com, .net, hotmail, outlook, gmail...)
+    - Mật khẩu email: nằm ngay ở vị trí tiếp theo sau vị trí của email (parts[i+1]).
+    Trả về: (email, password, email_index) hoặc (None, None, -1) nếu không tìm thấy.
+    """
+    if not raw_str:
+        return None, None, -1
+        
+    parts = [p.strip() for p in raw_str.split('|') if p.strip()]
+    if not parts:
+        return None, None, -1
+    
+    # Tìm phần tử là email: có '@' và dấu chấm tên miền sau '@' (như .com)
+    email_idx = -1
+    for idx, part in enumerate(parts):
+        lower_part = part.lower()
+        if '@' in lower_part:
+            domain_part = lower_part.split('@')[-1]
+            if '.com' in domain_part or '.' in domain_part:
+                email_idx = idx
+                break
+                
+    if email_idx != -1:
+        email = parts[email_idx]
+        password = parts[email_idx + 1] if (email_idx + 1 < len(parts)) else ""
+        return email, password, email_idx
+        
+    # Dự phòng nếu chuỗi có 2 phần tk|mk mà thiếu @
+    if len(parts) >= 2:
+        return parts[0], parts[1], 0
+    elif len(parts) == 1:
+        return parts[0], "", 0
+        
+    return None, None, -1
+
 # --- HÀM HỖ TRỢ LẤY OTP TỪ EMAIL KHÔI PHỤC (CHIẾN THUẬT 2 PHÚT / 20S) ---
 def get_outlook_otp_via_api(recovery_acc_str, log_signal):
     try:
@@ -309,7 +347,7 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal):
         return None
 
 
-async def process_single_account(email, password, recovery_acc, log_signal, result_signal, pause_event, user_id=""):
+async def process_single_account(raw_input_str, email, password, recovery_acc, log_signal, result_signal, pause_event):
     await pause_event.wait()
 
     CLIENT_ID = "b849bc72-dc2c-492f-b087-71e84e926496"
@@ -583,13 +621,9 @@ async def process_single_account(email, password, recovery_acc, log_signal, resu
                 refresh_token = res_data.get('refresh_token')
 
                 if refresh_token:
-                    if user_id:
-                        final_result = f"{user_id}|{email.strip()}|{password.strip()}|{refresh_token}|{CLIENT_ID}"
-                    else:
-                        if user_id:
-                            final_result = f"{user_id}|{email.strip()}|{password.strip()}|{refresh_token}|{CLIENT_ID}"
-                        else:
-                            final_result = f"{email.strip()}|{password.strip()}|{refresh_token}|{CLIENT_ID}"
+                    # Xuất kết quả theo đúng định dạng chuỗi đã nhập vào + |refresh_token|CLIENT_ID
+                    base_str = raw_input_str.strip()
+                    final_result = f"{base_str}|{refresh_token}|{CLIENT_ID}"
                     log_signal.emit(f"💾 LẤY THÀNH CÔNG:")
                     result_signal.emit(final_result)
                     
@@ -621,19 +655,17 @@ class AutomationWorker(QThread):
         self.pause_event = None
 
     def run(self):
-        parts = [p.strip() for p in self.target_acc.split('|') if p.strip()]
-        if len(parts) >= 3:
-            user_id = parts[0]
-            email = parts[1]
-            password = parts[2]
-        elif len(parts) == 2:
-            user_id = ""
-            email = parts[0]
-            password = parts[1]
-        else:
-            self.log_signal.emit("❌ Tài khoản cần lấy phải có dạng tk|mk hoặc userid|tk|mk...!")
+        email, password, email_idx = extract_email_and_password(self.target_acc)
+        if not email:
+            self.log_signal.emit("❌ Không nhận diện được email trong chuỗi nhập (cần chứa ký tự @ và .com)!")
             self.finished_signal.emit()
             return
+        if not password:
+            self.log_signal.emit(f"❌ Không tìm thấy mật khẩu email ở phía sau email '{email}'!")
+            self.finished_signal.emit()
+            return
+
+        self.log_signal.emit(f"🎯 Nhận diện thành công -> Email: {email} | Mật khẩu: {password}")
 
         if sys.platform == "win32":
             try:
@@ -647,7 +679,7 @@ class AutomationWorker(QThread):
         self.pause_event.set() 
 
         try:
-            loop.run_until_complete(process_single_account(email, password, self.recovery_acc, self.log_signal, self.result_signal, self.pause_event, user_id))
+            loop.run_until_complete(process_single_account(self.target_acc, email, password, self.recovery_acc, self.log_signal, self.result_signal, self.pause_event))
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -1020,11 +1052,19 @@ class MainWindow(QWidget):
         target_acc = self.acc_input.text().strip()
         recovery_acc = self.recovery_input.text().strip()
 
-        parts = target_acc.split('|')
-        if not target_acc or '|' not in target_acc or len(parts) < 2:
-            self.log_output.append("⚠️ Vui lòng nhập tài khoản đúng định dạng (có chứa dấu |)!")
+        if not target_acc:
+            self.log_output.append("⚠️ Vui lòng nhập tài khoản cần lấy OAuth2!")
+            return
+
+        email, password, _ = extract_email_and_password(target_acc)
+        if not email:
+            self.log_output.append("⚠️ Chuỗi tài khoản cần chứa email hợp lệ (có dấu hiệu @ và .com)!")
             return
             
+        if not password:
+            self.log_output.append(f"⚠️ Không tìm thấy mật khẩu email ở phía sau email '{email}'!")
+            return
+
         if not recovery_acc or '|' not in recovery_acc:
             self.log_output.append("⚠️ Vui lòng nhập email khôi phục dạng tk|mk|outh2|clientId!")
             return
@@ -1038,7 +1078,7 @@ class MainWindow(QWidget):
         self.worker.finished_signal.connect(lambda: self.btn_start.setEnabled(True))
         self.worker.start()
         
-        self.log_output.append("🚀 Đã bấm PLAY, trình duyệt đang khởi động...")
+        self.log_output.append(f"🚀 Đã bấm PLAY -> Nhận diện Email: {email} | Trình duyệt đang khởi động...")
 
     def toggle_pause(self):
         if not self.worker or not self.worker.isRunning():
@@ -1087,33 +1127,21 @@ class MainWindow(QWidget):
 
     def copy_account_only(self):
         acc_text = self.acc_input.text().strip()
-        if acc_text and '|' in acc_text:
-            parts = [p.strip() for p in acc_text.split('|') if p.strip()]
-            if len(parts) >= 3:
-                tk_val = parts[1] # Từ 3 biến trở lên thì tài khoản luôn ở vị trí thứ 2 (index 1)
-            elif len(parts) == 2:
-                tk_val = parts[0] # 2 biến thì tài khoản ở đầu (index 0)
-            else:
-                return
-            QApplication.clipboard().setText(tk_val)
-            self.log_output.append(f"📋 Đã copy Tài khoản: {tk_val}")
-            return
-        self.log_output.append("⚠️ Chưa có định dạng tài khoản hợp lệ để copy!")
+        email, _, _ = extract_email_and_password(acc_text)
+        if email:
+            QApplication.clipboard().setText(email)
+            self.log_output.append(f"📋 Đã copy Tài khoản email: {email}")
+        else:
+            self.log_output.append("⚠️ Không tìm thấy tài khoản email hợp lệ để copy!")
 
     def copy_password_only(self):
         acc_text = self.acc_input.text().strip()
-        if acc_text and '|' in acc_text:
-            parts = [p.strip() for p in acc_text.split('|') if p.strip()]
-            if len(parts) >= 3:
-                mk_val = parts[2] # Từ 3 biến trở lên thì mật khẩu luôn ở vị trí thứ 3 (index 2)
-            elif len(parts) == 2:
-                mk_val = parts[1] # 2 biến thì mật khẩu ở vị trí thứ 2 (index 1)
-            else:
-                return
-            QApplication.clipboard().setText(mk_val)
-            self.log_output.append(f"📋 Đã copy Mật khẩu: {mk_val}")
-            return
-        self.log_output.append("⚠️ Chưa có mật khẩu để copy!")
+        _, password, _ = extract_email_and_password(acc_text)
+        if password:
+            QApplication.clipboard().setText(password)
+            self.log_output.append(f"📋 Đã copy Mật khẩu email: {password}")
+        else:
+            self.log_output.append("⚠️ Không tìm thấy mật khẩu email để copy!")
 
     def fetch_and_copy_otp(self):
         # Lấy chuỗi từ ô kết quả thay vì ô email khôi phục
