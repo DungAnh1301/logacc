@@ -18,6 +18,60 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QTextCursor
 
 from playwright.async_api import async_playwright   
+import inspect
+import playwright
+import playwright._impl._driver as pw_driver
+
+def patch_playwright_driver():
+    """Vá lỗi Playwright không tìm thấy node.exe khi chạy trong file EXE (PyInstaller)"""
+    original_compute = pw_driver.compute_driver_executable
+
+    def custom_compute():
+        candidates = []
+        # 1. Thư mục tạm giải nén của PyInstaller
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(meipass, "playwright", "driver"))
+            candidates.append(os.path.join(meipass, "driver"))
+            candidates.append(meipass)
+
+        # 2. Thư mục chứa file exe / script
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, "playwright", "driver"))
+        candidates.append(os.path.join(exe_dir, "driver"))
+        candidates.append(exe_dir)
+
+        # 3. Thư mục playwright gốc
+        try:
+            p_file = inspect.getfile(playwright)
+            clean_dir = os.path.dirname(p_file)
+            if "base_library.zip" in clean_dir:
+                clean_dir = clean_dir.replace("base_library.zip", "").rstrip("/\\")
+            candidates.append(os.path.join(clean_dir, "driver"))
+        except Exception:
+            pass
+
+        # 4. Thư mục site-packages python trên máy người dùng
+        user_profile = os.environ.get("USERPROFILE", "")
+        if user_profile:
+            candidates.append(os.path.join(user_profile, r"AppData\Local\Programs\Python\Python313\Lib\site-packages\playwright\driver"))
+            candidates.append(os.path.join(user_profile, r"AppData\Local\Programs\Python\Python312\Lib\site-packages\playwright\driver"))
+            candidates.append(os.path.join(user_profile, r"AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\driver"))
+
+        for c in candidates:
+            node = os.path.join(c, "node.exe")
+            cli = os.path.join(c, "package", "cli.js")
+            if os.path.isfile(node) and os.path.isfile(cli):
+                return (node, cli)
+
+        return original_compute()
+
+    pw_driver.compute_driver_executable = custom_compute
+
+try:
+    patch_playwright_driver()
+except Exception:
+    pass
 
 # Cấu hình mã hóa UTF-8 cho console trên Windows để tránh lỗi UnicodeEncodeError
 if sys.platform == "win32":
@@ -265,7 +319,21 @@ async def process_single_account(email, password, recovery_acc, log_signal, resu
     TARGET_URL = f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id={CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&response_mode=query&scope={SCOPES.replace(' ', '%20')}&prompt=consent"
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False) 
+        browser = None
+        launch_errs = []
+        for ch in [None, "msedge", "chrome"]:
+            try:
+                if ch:
+                    log_signal.emit(f"🌐 Đang thử mở trình duyệt qua {ch}...")
+                    browser = await p.chromium.launch(headless=False, channel=ch)
+                else:
+                    browser = await p.chromium.launch(headless=False)
+                break
+            except Exception as ex:
+                launch_errs.append(f"{ch or 'chromium'}: {str(ex)}")
+
+        if not browser:
+            raise RuntimeError("Không thể khởi động trình duyệt:\n" + "\n".join(launch_errs))
         context = await browser.new_context(viewport={'width': 500, 'height': 650})
         
         await context.clear_cookies()
@@ -567,6 +635,11 @@ class AutomationWorker(QThread):
             self.finished_signal.emit()
             return
 
+        if sys.platform == "win32":
+            try:
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            except Exception:
+                pass
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self.loop = loop
@@ -576,7 +649,10 @@ class AutomationWorker(QThread):
         try:
             loop.run_until_complete(process_single_account(email, password, self.recovery_acc, self.log_signal, self.result_signal, self.pause_event, user_id))
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             self.log_signal.emit(f"❌ Lỗi luồng: {str(e)}")
+            safe_print(f"Lỗi luồng chi tiết:\n{tb}")
         finally:
             loop.close()
             self.finished_signal.emit()
