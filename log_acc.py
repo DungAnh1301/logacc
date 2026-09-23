@@ -621,8 +621,17 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
                 refresh_token = res_data.get('refresh_token')
 
                 if refresh_token:
-                    # Xuất kết quả theo đúng định dạng chuỗi đã nhập vào + |refresh_token|CLIENT_ID
-                    base_str = raw_input_str.strip()
+                    # Tự động cắt bỏ token cũ nếu chuỗi đầu vào đã có sẵn token ở đuôi
+                    parts = [p.strip() for p in raw_input_str.split('|') if p.strip()]
+                    _, _, email_idx = extract_email_and_password(raw_input_str)
+                    
+                    if email_idx != -1 and (email_idx + 1 < len(parts)):
+                        # Chỉ giữ lại từ đầu đến hết mật khẩu email (loại bỏ token cũ phía sau nếu có)
+                        base_parts = parts[:email_idx + 2]
+                        base_str = "|".join(base_parts)
+                    else:
+                        base_str = raw_input_str.strip()
+
                     final_result = f"{base_str}|{refresh_token}|{CLIENT_ID}"
                     log_signal.emit(f"💾 LẤY THÀNH CÔNG:")
                     result_signal.emit(final_result)
