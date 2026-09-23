@@ -359,19 +359,41 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
     async with async_playwright() as p:
         browser = None
         launch_errs = []
-        for ch in [None, "msedge", "chrome"]:
-            try:
-                if ch:
-                    log_signal.emit(f"🌐 Đang thử mở trình duyệt qua {ch}...")
-                    browser = await p.chromium.launch(headless=False, channel=ch)
-                else:
-                    browser = await p.chromium.launch(headless=False)
+
+        # 1. Tìm đường dẫn Google Chrome thật trên máy
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
+        ]
+        real_chrome = None
+        for cp in chrome_paths:
+            if os.path.isfile(cp):
+                real_chrome = cp
                 break
+
+        # Ưu tiên mở Google Chrome
+        if real_chrome:
+            try:
+                browser = await p.chromium.launch(executable_path=real_chrome, headless=False)
             except Exception as ex:
-                launch_errs.append(f"{ch or 'chromium'}: {str(ex)}")
+                launch_errs.append(f"Chrome ({real_chrome}): {ex}")
 
         if not browser:
-            raise RuntimeError("Không thể khởi động trình duyệt:\n" + "\n".join(launch_errs))
+            try:
+                browser = await p.chromium.launch(channel="chrome", headless=False)
+            except Exception as ex:
+                launch_errs.append(f"Channel chrome: {ex}")
+
+        # Fallback về Chromium mặc định của Playwright nếu không có Chrome
+        if not browser:
+            try:
+                browser = await p.chromium.launch(headless=False)
+            except Exception as ex:
+                launch_errs.append(f"Chromium: {ex}")
+
+        if not browser:
+            raise RuntimeError("Không thể khởi động Google Chrome:\n" + "\n".join(launch_errs))
         context = await browser.new_context(viewport={'width': 500, 'height': 650})
         
         await context.clear_cookies()
