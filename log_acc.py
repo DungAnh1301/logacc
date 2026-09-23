@@ -372,23 +372,29 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
                 real_chrome = cp
                 break
 
+        # Các tham số chặn popup WebAuthn / Passkey của Windows
+        chrome_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=WebAuthentication,WebAuthenticationNewWindowUI,WebAuthenticationProxy",
+        ]
+
         # Ưu tiên mở Google Chrome
         if real_chrome:
             try:
-                browser = await p.chromium.launch(executable_path=real_chrome, headless=False)
+                browser = await p.chromium.launch(executable_path=real_chrome, headless=False, args=chrome_args)
             except Exception as ex:
                 launch_errs.append(f"Chrome ({real_chrome}): {ex}")
 
         if not browser:
             try:
-                browser = await p.chromium.launch(channel="chrome", headless=False)
+                browser = await p.chromium.launch(channel="chrome", headless=False, args=chrome_args)
             except Exception as ex:
                 launch_errs.append(f"Channel chrome: {ex}")
 
         # Fallback về Chromium mặc định của Playwright nếu không có Chrome
         if not browser:
             try:
-                browser = await p.chromium.launch(headless=False)
+                browser = await p.chromium.launch(headless=False, args=chrome_args)
             except Exception as ex:
                 launch_errs.append(f"Chromium: {ex}")
 
@@ -396,6 +402,28 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
             raise RuntimeError("Không thể khởi động Google Chrome:\n" + "\n".join(launch_errs))
         context = await browser.new_context(viewport={'width': 500, 'height': 650})
         
+        # Chặn triệt để Windows Hello / Passkey popup của Windows
+        await context.add_init_script("""
+            if (window.PublicKeyCredential) {
+                window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function() {
+                    return Promise.resolve(false);
+                };
+                if (window.PublicKeyCredential.isConditionalMediationAvailable) {
+                    window.PublicKeyCredential.isConditionalMediationAvailable = function() {
+                        return Promise.resolve(false);
+                    };
+                }
+            }
+            if (window.navigator && window.navigator.credentials) {
+                window.navigator.credentials.create = function() {
+                    return Promise.reject(new DOMException("The user canceled the operation.", "NotAllowedError"));
+                };
+                window.navigator.credentials.get = function() {
+                    return Promise.reject(new DOMException("The user canceled the operation.", "NotAllowedError"));
+                };
+            }
+        """)
+
         await context.clear_cookies()
         await context.clear_permissions()
         
@@ -466,16 +494,33 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
             await asyncio.sleep(3) 
 
             # ==========================================
-            # BƯỚC 3: CHECK KHUNG BẢO MẬT / THÊM EMAIL KHÔI PHỤC & OTP
+            # BƯỚC 3: CHECK KHUNG BẢO MẬT / THÊM EMAIL KHÔI PHỤC & OTP / PASSKEY
             # ==========================================
             log_signal.emit(f"🛡️ [Bước 3] Kiểm tra khung bảo mật / email khôi phục...")
-            for _ in range(15):
+            for _ in range(25):
                 await pause_event.wait()
                 await asyncio.sleep(1)
                 try:
                     content = await page.content()
                 except:
                     break
+
+                # Check nếu hiện màn hình Passkey (FIDO) / Windows Hello
+                is_passkey_screen = (
+                    "fido" in page.url.lower()
+                    or "passkey" in content.lower()
+                    or "setting up your passkey" in content.lower()
+                )
+                if is_passkey_screen:
+                    log_signal.emit("🛡️ Phát hiện màn hình Passkey, đang tự động bấm Cancel / Skip để bỏ qua...")
+                    try:
+                        btn_cancel = page.locator("button:has-text('Cancel'), input[value='Cancel'], #idBtn_Back, button:has-text('Hủy'), button:has-text('Skip'), a:has-text('Skip'), a:has-text('Cancel')")
+                        if await btn_cancel.count() > 0:
+                            await btn_cancel.first.click(timeout=3000)
+                            await asyncio.sleep(2)
+                            continue
+                    except Exception as e:
+                        log_signal.emit(f"⚠️ Thử bấm Cancel Passkey: {e}")
 
                 # Luồng Microsoft Fluent mới có thể đổi chữ nút theo từng bước:
                 # 1) Help protect your account -> Add email
@@ -590,6 +635,14 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
                     # Cuộn xuống đáy để đảm bảo nhìn thấy nút Accept
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
                     await asyncio.sleep(0.5)
+
+                    # Bỏ qua màn hình Passkey nếu xuất hiện ở bước này
+                    if "fido" in page.url.lower() or "passkey" in (await page.content()).lower():
+                        btn_cancel = page.locator("button:has-text('Cancel'), input[value='Cancel'], #idBtn_Back, button:has-text('Hủy'), a:has-text('Cancel')")
+                        if await btn_cancel.count() > 0:
+                            await btn_cancel.first.click(timeout=3000)
+                            await asyncio.sleep(1.5)
+                            continue
 
                     if await page.is_visible(sel_accept):
                         log_signal.emit(f"📝 Đã thấy bảng Accept, đang bấm...")
