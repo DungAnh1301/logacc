@@ -347,6 +347,70 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal):
         return None
 
 
+# ========================================================
+# CẤU HÌNH & BỘ SINH FAKE FINGERPRINT (CHỐNG QUÉT THIẾT BỊ)
+# ========================================================
+CHROME_VERSIONS = [
+    ("133", "133.0.6943.53", "15.0.0"),
+    ("132", "132.0.6834.83", "15.0.0"),
+    ("131", "131.0.6778.86", "10.0.0"),
+    ("130", "130.0.6723.92", "10.0.0"),
+    ("129", "129.0.6668.71", "10.0.0"),
+    ("128", "128.0.6613.120", "10.0.0"),
+]
+
+GPU_PROFILES = [
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (Intel)", "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 580 Series Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+    ("Google Inc. (AMD)", "ANGLE (AMD, AMD Radeon RX 6600 Direct3D11 vs_5_0 ps_5_0, D3D11)"),
+]
+
+SCREEN_RESOLUTIONS = [
+    (1920, 1080),
+    (1366, 768),
+    (1536, 864),
+    (1600, 900),
+    (1440, 900),
+    (2560, 1440),
+]
+
+def generate_fake_fingerprint():
+    """Tạo bộ thông số vân tay trình duyệt ngẫu nhiên cho mỗi phiên đăng nhập"""
+    chrome_major, chrome_full, plat_ver = random.choice(CHROME_VERSIONS)
+    gpu_vendor, gpu_renderer = random.choice(GPU_PROFILES)
+    screen_w, screen_h = random.choice(SCREEN_RESOLUTIONS)
+    cpu_cores = random.choice([4, 6, 8, 12, 16])
+    device_ram = random.choice([4, 8, 16, 32])
+    touch_points = random.choice([0, 0, 0, 10])  # Desktop chuẩn là 0, một số laptop có touch là 10
+    canvas_shift = random.choice([1, 2, 3, -1, -2])
+    audio_noise = random.choice([0.00001, 0.00002, -0.00001, -0.00002])
+    
+    user_agent = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_full} Safari/537.36"
+    
+    return {
+        "chrome_major": chrome_major,
+        "chrome_full": chrome_full,
+        "plat_ver": plat_ver,
+        "user_agent": user_agent,
+        "gpu_vendor": gpu_vendor,
+        "gpu_renderer": gpu_renderer,
+        "screen_w": screen_w,
+        "screen_h": screen_h,
+        "cpu_cores": cpu_cores,
+        "device_ram": device_ram,
+        "touch_points": touch_points,
+        "canvas_shift": canvas_shift,
+        "audio_noise": audio_noise,
+    }
+
+
 async def process_single_account(raw_input_str, email, password, recovery_acc, log_signal, result_signal, pause_event):
     await pause_event.wait()
 
@@ -400,29 +464,186 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
 
         if not browser:
             raise RuntimeError("Không thể khởi động Google Chrome:\n" + "\n".join(launch_errs))
-        context = await browser.new_context(viewport={'width': 500, 'height': 650})
+
+        # ========================================================
+        # KHỞI TẠO BỘ FAKE FINGERPRINT RIÊNG BIỆT CHO MỖI TÀI KHOẢN
+        # ========================================================
+        fp = generate_fake_fingerprint()
+        short_gpu = fp["gpu_renderer"].split(",")[1].strip() if "," in fp["gpu_renderer"] else fp["gpu_renderer"]
+        log_signal.emit(f"🎭 [Fake Fingerprint] Chrome v{fp['chrome_major']} | GPU: {short_gpu} | CPU: {fp['cpu_cores']}C | RAM: {fp['device_ram']}GB | Touch: {fp['touch_points']} | Screen: {fp['screen_w']}x{fp['screen_h']}")
+
+        context = await browser.new_context(
+            viewport={'width': 500, 'height': 650},
+            user_agent=fp["user_agent"],
+            locale="en-US",
+            timezone_id="Asia/Ho_Chi_Minh",
+            has_touch=(fp["touch_points"] > 0)
+        )
         
-        # Chặn triệt để Windows Hello / Passkey popup của Windows
-        await context.add_init_script("""
-            if (window.PublicKeyCredential) {
-                window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function() {
-                    return Promise.resolve(false);
-                };
-                if (window.PublicKeyCredential.isConditionalMediationAvailable) {
-                    window.PublicKeyCredential.isConditionalMediationAvailable = function() {
-                        return Promise.resolve(false);
-                    };
-                }
-            }
-            if (window.navigator && window.navigator.credentials) {
-                window.navigator.credentials.create = function() {
-                    return Promise.reject(new DOMException("The user canceled the operation.", "NotAllowedError"));
-                };
-                window.navigator.credentials.get = function() {
-                    return Promise.reject(new DOMException("The user canceled the operation.", "NotAllowedError"));
-                };
-            }
-        """)
+        # Tiêm mã JS giả lập vân tay + chặn Passkey trước khi tải bất kỳ trang web nào
+        stealth_script = f"""
+        (() => {{
+            // 1. Chặn triệt để Windows Hello / Passkey popup của Windows
+            if (window.PublicKeyCredential) {{
+                window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+                if (window.PublicKeyCredential.isConditionalMediationAvailable) {{
+                    window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
+                }}
+            }}
+            if (window.navigator && window.navigator.credentials) {{
+                window.navigator.credentials.create = () => Promise.reject(new DOMException("The user canceled the operation.", "NotAllowedError"));
+                window.navigator.credentials.get = () => Promise.reject(new DOMException("The user canceled the operation.", "NotAllowedError"));
+            }}
+
+            // 2. Ẩn navigator.webdriver
+            try {{
+                Object.defineProperty(navigator, 'webdriver', {{
+                    get: () => undefined,
+                    configurable: true
+                }});
+            }} catch(e) {{}}
+
+            // 3. Fake Client Hints (navigator.userAgentData) khớp với User-Agent Chrome
+            try {{
+                if (navigator.userAgentData) {{
+                    Object.defineProperty(navigator, 'userAgentData', {{
+                        get: () => ({{
+                            brands: [
+                                {{ brand: "Chromium", version: "{fp['chrome_major']}" }},
+                                {{ brand: "Google Chrome", version: "{fp['chrome_major']}" }},
+                                {{ brand: "Not=A?Brand", version: "24" }}
+                            ],
+                            mobile: false,
+                            platform: "Windows",
+                            getHighEntropyValues: async (hints) => ({{
+                                architecture: "x86",
+                                bitness: "64",
+                                brands: [
+                                    {{ brand: "Chromium", version: "{fp['chrome_major']}" }},
+                                    {{ brand: "Google Chrome", version: "{fp['chrome_major']}" }},
+                                    {{ brand: "Not=A?Brand", version: "24" }}
+                                ],
+                                fullVersionList: [
+                                    {{ brand: "Chromium", version: "{fp['chrome_full']}" }},
+                                    {{ brand: "Google Chrome", version: "{fp['chrome_full']}" }},
+                                    {{ brand: "Not=A?Brand", version: "24.0.0.0" }}
+                                ],
+                                mobile: false,
+                                model: "",
+                                platform: "Windows",
+                                platformVersion: "{fp['plat_ver']}",
+                                uaFullVersion: "{fp['chrome_full']}"
+                            }})
+                        }}),
+                        configurable: true
+                    }});
+                }}
+            }} catch(e) {{}}
+
+            // 4. Fake Hardware Specs (CPU, RAM)
+            try {{
+                Object.defineProperty(navigator, 'hardwareConcurrency', {{
+                    get: () => {fp['cpu_cores']},
+                    configurable: true
+                }});
+                Object.defineProperty(navigator, 'deviceMemory', {{
+                    get: () => {fp['device_ram']},
+                    configurable: true
+                }});
+            }} catch(e) {{}}
+
+            // 5. Fake Touch points (findtouch / maxTouchPoints)
+            try {{
+                Object.defineProperty(navigator, 'maxTouchPoints', {{
+                    get: () => {fp['touch_points']},
+                    configurable: true
+                }});
+            }} catch(e) {{}}
+
+            // 6. Fake Screen Resolution & Color
+            try {{
+                const sw = {fp['screen_w']};
+                const sh = {fp['screen_h']};
+                Object.defineProperty(screen, 'width', {{ get: () => sw, configurable: true }});
+                Object.defineProperty(screen, 'height', {{ get: () => sh, configurable: true }});
+                Object.defineProperty(screen, 'availWidth', {{ get: () => sw, configurable: true }});
+                Object.defineProperty(screen, 'availHeight', {{ get: () => sh - 40, configurable: true }});
+                Object.defineProperty(screen, 'colorDepth', {{ get: () => 24, configurable: true }});
+                Object.defineProperty(screen, 'pixelDepth', {{ get: () => 24, configurable: true }});
+            }} catch(e) {{}}
+
+            // 7. Fake WebGL Vendor & Renderer
+            try {{
+                const getParameter1 = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(param) {{
+                    if (param === 37445) return "{fp['gpu_vendor']}";
+                    if (param === 37446) return "{fp['gpu_renderer']}";
+                    return getParameter1.apply(this, arguments);
+                }};
+                if (window.WebGL2RenderingContext) {{
+                    const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+                    WebGL2RenderingContext.prototype.getParameter = function(param) {{
+                        if (param === 37445) return "{fp['gpu_vendor']}";
+                        if (param === 37446) return "{fp['gpu_renderer']}";
+                        return getParameter2.apply(this, arguments);
+                    }};
+                }}
+            }} catch(e) {{}}
+
+            // 8. Fake Canvas Fingerprint (chèn vi sai ngẫu nhiên từng phiên)
+            try {{
+                const shift = {fp['canvas_shift']};
+                const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                HTMLCanvasElement.prototype.toDataURL = function(...args) {{
+                    const ctx = this.getContext('2d');
+                    if (ctx && this.width > 0 && this.height > 0) {{
+                        try {{
+                            const img = ctx.getImageData(0, 0, Math.min(this.width, 8), Math.min(this.height, 8));
+                            for (let i = 0; i < img.data.length; i += 4) {{
+                                img.data[i] = (img.data[i] + shift) % 256;
+                            }}
+                            ctx.putImageData(img, 0, 0);
+                        }} catch(err) {{}}
+                    }}
+                    return origToDataURL.apply(this, args);
+                }};
+
+                const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+                CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
+                    const imgData = origGetImageData.apply(this, args);
+                    if (imgData && imgData.data && imgData.data.length > 0) {{
+                        for (let i = 0; i < Math.min(imgData.data.length, 32); i += 4) {{
+                            imgData.data[i] = (imgData.data[i] + shift) % 256;
+                        }}
+                    }}
+                    return imgData;
+                }};
+            }} catch(e) {{}}
+
+            // 9. Fake AudioContext Fingerprint
+            try {{
+                if (window.AudioBuffer) {{
+                    const origGetChannelData = AudioBuffer.prototype.getChannelData;
+                    AudioBuffer.prototype.getChannelData = function(...args) {{
+                        const data = origGetChannelData.apply(this, args);
+                        for (let i = 0; i < Math.min(data.length, 50); i += 5) {{
+                            data[i] += {fp['audio_noise']};
+                        }}
+                        return data;
+                    }};
+                }}
+            }} catch(e) {{}}
+
+            // 10. Fake Chrome Object & Plugins
+            try {{
+                if (!window.chrome) window.chrome = {{}};
+                if (!window.chrome.runtime) window.chrome.runtime = {{}};
+                if (!window.chrome.loadTimes) window.chrome.loadTimes = () => ({{}});
+                if (!window.chrome.csi) window.chrome.csi = () => ({{}});
+            }} catch(e) {{}}
+        }})();
+        """
+        await context.add_init_script(stealth_script)
 
         await context.clear_cookies()
         await context.clear_permissions()
