@@ -1390,7 +1390,7 @@ class MainWindow(QWidget):
         result_container.addLayout(row1)
         main_layout.addLayout(result_container)
 
-        # --- 2. DÒNG 2: COPY TÀI KHOẢN + COPY MẬT KHẨU + COPY OTP + COPY LINK ---
+        # --- 2. DÒNG 2: COPY TÀI KHOẢN + COPY MẬT KHẨU + COPY OTP + PLAY VPN+GPM + ĐỔI TÊN+AVATAR ---
         row2 = QHBoxLayout()
         
         btn_copy_tk = QPushButton("Copy Tài Khoản")
@@ -1411,14 +1411,21 @@ class MainWindow(QWidget):
         self.btn_play_vpn_gpm.clicked.connect(self.copy_link_and_vpn)
         self.btn_play_vpn_gpm.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        # Đưa cả 4 nút vào row2 với stretch=1 để chúng to bằng nhau và bằng 4 nút ở hàng dưới
+        # Nút ở vị trí thứ 5: Đổi Tên + Avatar TikTok
+        self.btn_change_name_avatar = QPushButton("Đổi Tên + Avatar")
+        self.btn_change_name_avatar.setStyleSheet("padding: 10px; background-color: #e65100; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_change_name_avatar.clicked.connect(self.trigger_change_name_avatar)
+        self.btn_change_name_avatar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # Đưa cả 5 nút vào row2 với stretch=1 để bằng nhau hoàn toàn
         row2.addWidget(btn_copy_tk, stretch=1)
         row2.addWidget(btn_copy_mk, stretch=1)
         row2.addWidget(btn_copy_otp, stretch=1)
         row2.addWidget(self.btn_play_vpn_gpm, stretch=1)
+        row2.addWidget(self.btn_change_name_avatar, stretch=1)
         main_layout.addLayout(row2)
 
-        # --- 3. DÒNG 3: PLAY + TẠM DỪNG + STOP + XÓA LOG ---
+        # --- 3. DÒNG 3: PLAY + TẠM DỪNG + STOP + XÓA LOG + CẬP NHẬT ---
         row3 = QHBoxLayout()
         
         self.btn_start = QPushButton("PLAY")
@@ -1441,11 +1448,12 @@ class MainWindow(QWidget):
         self.btn_update.setStyleSheet("padding: 10px; background-color: #1565c0; color: white; border-radius: 4px; font-weight: bold;")
         self.btn_update.clicked.connect(self.manual_check_update)
 
-        row3.addWidget(self.btn_start)
-        row3.addWidget(self.btn_pause)
-        row3.addWidget(self.btn_stop)
-        row3.addWidget(self.btn_clear)
-        row3.addWidget(self.btn_update)
+        # Đưa cả 5 nút vào row3 với stretch=1 để khớp thẳng cột với row2
+        row3.addWidget(self.btn_start, stretch=1)
+        row3.addWidget(self.btn_pause, stretch=1)
+        row3.addWidget(self.btn_stop, stretch=1)
+        row3.addWidget(self.btn_clear, stretch=1)
+        row3.addWidget(self.btn_update, stretch=1)
         main_layout.addLayout(row3)
 
         # Khu vực hiển thị Log
@@ -1690,6 +1698,92 @@ class MainWindow(QWidget):
             f"🚀 [Bước 1] Bắt đầu VPN+GPM với profile: {profile_name} | API: {api_url}"
         )
         self.connect_vpn_us_background(profile_name, api_url)
+
+    def trigger_change_name_avatar(self):
+        """Kích hoạt đổi Tên Nick và Avatar trên Profile GPM đang mở hoặc mở mới."""
+        profile_name = self.gpm_profile_input.text().strip()
+        api_url = self.gpm_api_input.text().strip()
+        if not profile_name:
+            self.log_output.append("⚠️ Vui lòng nhập tên profile GPM, ví dụ US-45-1.")
+            return
+        if not api_url:
+            self.log_output.append("⚠️ Vui lòng nhập địa chỉ GPM Local API.")
+            return
+        if not api_url.startswith(("http://", "https://")):
+            self.log_output.append("⚠️ GPM Local API phải bắt đầu bằng http:// hoặc https://.")
+            return
+
+        do_nick = self.cb_change_nickname.isChecked()
+        do_avatar = self.cb_change_avatar.isChecked()
+
+        if not do_nick and not do_avatar:
+            self.log_output.append("⚠️ Cả 2 tùy chọn 'Đổi tên nick' và 'Đổi Avatar' đều đang tắt. Hãy tích chọn ít nhất 1 mục!")
+            return
+
+        chosen_nick = get_random_nickname() if do_nick else None
+        chosen_avatar = get_random_avatar() if do_avatar else None
+
+        if do_nick and not chosen_nick and do_avatar and not chosen_avatar:
+            self.log_output.append("⚠️ File nicknames.txt và thư mục avatars/ đều trống!")
+            return
+
+        self.log_output.append(f"🚀 [Bấm Đổi Tên + Avatar] Profile: {profile_name}...")
+        if do_nick:
+            if chosen_nick:
+                self.log_output.append(f"🎯 [TikTok] Tên nick ngẫu nhiên: '{chosen_nick}'")
+            else:
+                self.log_output.append("ℹ️ [TikTok] File nicknames.txt trống, không đổi tên.")
+
+        if do_avatar:
+            if chosen_avatar:
+                self.log_output.append(f"🖼️ [TikTok] Ảnh avatar ngẫu nhiên: '{os.path.basename(chosen_avatar)}'")
+            else:
+                self.log_output.append("ℹ️ [TikTok] Thư mục avatars/ trống, không đổi avatar.")
+
+        def run_change():
+            try:
+                api = api_url.rstrip('/')
+                self.background_log_signal.emit(f"🧭 [GPM] Đang kiểm tra profile: {profile_name}...")
+                
+                # Tìm profile
+                response = requests.get(f"{api}/profiles", params={"page": 1, "page_size": 100}, timeout=15)
+                response.raise_for_status()
+                payload = response.json()
+                profiles = payload.get("data") or []
+                target = next((p for p in profiles if str(p.get("name", "")).strip() == profile_name.strip()), None)
+                
+                if not target:
+                    self.background_log_signal.emit(f"❌ [GPM] Không tìm thấy profile: {profile_name}")
+                    return
+
+                # Mở profile nếu chưa mở để lấy remote_debugging_address
+                self.background_log_signal.emit(f"🚀 [GPM] Đang kết nối tới profile {profile_name}...")
+                start_res = requests.get(f"{api}/profiles/start/{target['id']}", timeout=30)
+                start_res.raise_for_status()
+                start_payload = start_res.json()
+                if not start_payload.get("success"):
+                    raise RuntimeError(start_payload.get("message", "GPM từ chối mở profile"))
+
+                remote_address = (start_payload.get("data") or {}).get("remote_debugging_address")
+                if not remote_address:
+                    raise RuntimeError("GPM không trả về remote_debugging_address")
+
+                if not remote_address.startswith(("http://", "https://")):
+                    remote_address = f"http://{remote_address}"
+
+                # Mở tab TikTok nếu cần
+                time.sleep(1)
+                try:
+                    open_url = f"{remote_address}/json/new?{urllib.parse.quote('https://www.tiktok.com/', safe=':/')}"
+                    requests.put(open_url, timeout=10)
+                except Exception:
+                    pass
+
+                self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar)
+            except Exception as ex:
+                self.background_log_signal.emit(f"❌ [Đổi Tên+Avatar] Lỗi: {str(ex)}")
+
+        threading.Thread(target=run_change, daemon=True).start()
 
     def advance_gpm_profile(self):
         """US-45-1 ... US-45-5 -> US-46-1; luôn đọc giá trị hiện tại trên GUI."""
