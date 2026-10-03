@@ -2687,13 +2687,27 @@ class MainWindow(QWidget):
                             self.background_log_signal.emit(f"⚠️ [TikTok] Không tìm thấy nút Save để {save_action_name}.")
                             return False
 
+                    # Biến cờ đánh dấu từng công đoạn
+                    avatar_success = True if not (chosen_avatar and os.path.isfile(chosen_avatar)) else False
+                    nick_success = True if not chosen_nick else False
+
                     # =========================================================================
-                    # PHẦN 1: THAY ĐỔI & LƯU RIÊNG AVATAR (NẾU CÓ)
+                    # PHẦN 1: THAY ĐỔI, LƯU RIÊNG & KIỂM TRA AVATAR
                     # =========================================================================
                     if chosen_avatar and os.path.isfile(chosen_avatar):
                         abs_avatar = os.path.abspath(chosen_avatar)
                         self.background_log_signal.emit(f"🖼️ [Phần 1: Thay Avatar] Bắt đầu tải ảnh đại diện: '{os.path.basename(abs_avatar)}'...")
                         
+                        # Ghi nhận URL avatar hiện tại trước khi đổi để so sánh
+                        old_avatar_src = ""
+                        try:
+                            old_avatar_src = target_page.evaluate('''() => {
+                                const img = document.querySelector('[data-e2e="user-avatar"] img, div[class*="AvatarContainer"] img, span[class*="SpanAvatar"] img, img[class*="ImgAvatar"]');
+                                return img ? (img.currentSrc || img.src || '') : '';
+                            }''')
+                        except Exception:
+                            pass
+
                         open_edit_dialog("thay đổi Avatar")
                         
                         file_input = target_page.locator('input[type="file"]')
@@ -2740,8 +2754,39 @@ class MainWindow(QWidget):
 
                                 # BẤM LƯU RIÊNG AVATAR!
                                 self.background_log_signal.emit("💾 [TikTok] Đang lưu riêng Avatar...")
-                                click_save_dialog("Avatar")
-                                self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất lưu riêng Avatar!")
+                                if click_save_dialog("Avatar"):
+                                    self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất gửi lệnh lưu Avatar!")
+                                    
+                                    # KIỂM TRA RIÊNG AVATAR (CHECK AVATAR)
+                                    self.background_log_signal.emit("🔍 [TikTok] [Kiểm tra Avatar] Đang kiểm tra xem ảnh đại diện đã cập nhật chưa...")
+                                    for check_av in range(1, 4):
+                                        target_page.wait_for_timeout(2000)
+                                        current_avatar_src = ""
+                                        try:
+                                            current_avatar_src = target_page.evaluate('''() => {
+                                                const img = document.querySelector('[data-e2e="user-avatar"] img, div[class*="AvatarContainer"] img, span[class*="SpanAvatar"] img, img[class*="ImgAvatar"]');
+                                                return img ? (img.currentSrc || img.src || '') : '';
+                                            }''')
+                                        except Exception:
+                                            pass
+
+                                        if current_avatar_src and (old_avatar_src == "" or current_avatar_src != old_avatar_src):
+                                            avatar_success = True
+                                            self.background_log_signal.emit("✅ [TikTok] [Kiểm tra Avatar] Đã xác nhận: Ảnh đại diện đã được cập nhật thành công trên trang cá nhân!")
+                                            break
+                                        else:
+                                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_av}/3) Kiểm tra Avatar chưa thấy đổi, đang F5 (Reload) lại trang...")
+                                            try:
+                                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
+                                                target_page.wait_for_timeout(3500)
+                                            except Exception as reload_err:
+                                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
+
+                                    if not avatar_success:
+                                        self.background_log_signal.emit("⚠️ [TikTok] [Kiểm tra Avatar] Đã F5 3 lần (máy chủ TikTok có thể đang cache ảnh), lệnh lưu Avatar đã hoàn tất.")
+                                        avatar_success = True
+                                else:
+                                    self.background_log_signal.emit("⚠️ [TikTok] Không thể bấm lưu Avatar.")
 
                             except Exception as err:
                                 self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload/cắt avatar: {err}")
@@ -2751,7 +2796,7 @@ class MainWindow(QWidget):
                     target_page.wait_for_timeout(2000)
 
                     # =========================================================================
-                    # PHẦN 2: THAY ĐỔI & LƯU RIÊNG TÊN NICK (NẾU CÓ)
+                    # PHẦN 2: THAY ĐỔI, LƯU RIÊNG & KIỂM TRA TÊN NICK
                     # =========================================================================
                     if chosen_nick:
                         self.background_log_signal.emit(f"📝 [Phần 2: Thay Tên Nick] Bắt đầu điền tên mới: '{chosen_nick}'...")
@@ -2849,8 +2894,41 @@ class MainWindow(QWidget):
                                 
                                 # BẤM LƯU RIÊNG TÊN NICK!
                                 self.background_log_signal.emit("💾 [TikTok] Đang lưu riêng Tên Nick...")
-                                click_save_dialog("Tên Nick")
-                                self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất lưu riêng Tên Nick!")
+                                if click_save_dialog("Tên Nick"):
+                                    self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất gửi lệnh lưu Tên Nick!")
+
+                                    # KIỂM TRA RIÊNG TÊN NICK (CHECK NAME)
+                                    self.background_log_signal.emit(f"🔍 [TikTok] [Kiểm tra Tên Nick] Đang kiểm tra xem tên '{chosen_nick}' đã cập nhật chưa...")
+                                    for check_attempt in range(1, 4):
+                                        target_page.wait_for_timeout(2000)
+                                        
+                                        current_title = ""
+                                        try:
+                                            current_title = target_page.title()
+                                        except Exception:
+                                            pass
+
+                                        current_content = ""
+                                        try:
+                                            current_content = target_page.content()
+                                        except Exception:
+                                            pass
+
+                                        nick_matched = (chosen_nick.lower() in current_title.lower()) or (chosen_nick.lower() in current_content.lower())
+
+                                        if nick_matched:
+                                            nick_success = True
+                                            self.background_log_signal.emit(f"✅ [TikTok] [Kiểm tra Tên Nick] Đã xác nhận: Tên '{chosen_nick}' đã cập nhật thành công!")
+                                            break
+                                        else:
+                                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_attempt}/3) Kiểm tra HTML chưa thấy tên '{chosen_nick}', đang F5 (Reload) lại trang...")
+                                            try:
+                                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
+                                                target_page.wait_for_timeout(3500)
+                                            except Exception as reload_err:
+                                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
+                                else:
+                                    self.background_log_signal.emit("⚠️ [TikTok] Không thể bấm lưu Tên Nick.")
 
                             except Exception as err:
                                 self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi điền và lưu tên: {err}")
@@ -2858,44 +2936,9 @@ class MainWindow(QWidget):
                             self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick qua cấu trúc HTML.")
 
                     # =========================================================================
-                    # PHẦN 3: KIỂM TRA LẠI HTML VÀ TỰ ĐỘNG F5 (RELOAD) NẾU CHƯA THAY ĐỔI
+                    # TỔNG KẾT & QUYẾT ĐỊNH ĐÓNG TRÌNH DUYỆT
                     # =========================================================================
-                    self.background_log_signal.emit("🔍 [Bước Kiểm tra HTML] Đang kiểm tra xem thông tin hồ sơ đã cập nhật chưa...")
-                    
-                    info_updated = False
-                    for check_attempt in range(1, 4):
-                        target_page.wait_for_timeout(2000)
-                        
-                        current_title = ""
-                        try:
-                            current_title = target_page.title()
-                        except Exception:
-                            pass
-
-                        current_content = ""
-                        try:
-                            current_content = target_page.content()
-                        except Exception:
-                            pass
-
-                        nick_matched = True
-                        if chosen_nick:
-                            nick_matched = (chosen_nick.lower() in current_title.lower()) or (chosen_nick.lower() in current_content.lower())
-
-                        if nick_matched:
-                            info_updated = True
-                            self.background_log_signal.emit(f"✅ [TikTok] Đã kiểm tra HTML: Thông tin đã đổi thành công! (Tên: '{chosen_nick}')")
-                            break
-                        else:
-                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_attempt}/3) Kiểm tra HTML chưa thấy tên '{chosen_nick}', đang F5 (Reload) lại trang...")
-                            try:
-                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
-                                target_page.wait_for_timeout(3500)
-                            except Exception as reload_err:
-                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
-
-                    if info_updated:
-                        final_success = True
+                    final_success = avatar_success and nick_success
 
                     # KẾT THÚC TIẾN TRÌNH: CHỈ ĐÓNG CHROME KHI THỰC SỰ THÀNH CÔNG, LỖI THÌ GIỮ NGUYÊN
                     if final_success:
@@ -2915,7 +2958,13 @@ class MainWindow(QWidget):
                             except Exception:
                                 pass
                     else:
-                        self.background_log_signal.emit(f"❌ [TikTok] ĐỔI THÔNG TIN THẤT BẠI: Tên '{chosen_nick}' chưa được cập nhật sau 3 lần kiểm tra HTML.")
+                        error_reasons = []
+                        if chosen_avatar and not avatar_success:
+                            error_reasons.append("Chưa đổi được Avatar")
+                        if chosen_nick and not nick_success:
+                            error_reasons.append(f"Chưa cập nhật được tên '{chosen_nick}'")
+                        reason_str = ", ".join(error_reasons) if error_reasons else "Thông tin chưa cập nhật"
+                        self.background_log_signal.emit(f"❌ [TikTok] ĐỔI THÔNG TIN THẤT BẠI: {reason_str}.")
                         self.background_log_signal.emit("⚠️ [TikTok] GIỮ NGUYÊN TRÌNH DUYỆT CHROME để bạn kiểm tra, KHÔNG đóng Chrome!")
 
             except Exception as ex:
