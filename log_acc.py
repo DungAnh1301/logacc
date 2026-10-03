@@ -13,6 +13,8 @@ import shutil
 import importlib.util
 import ctypes
 import psutil
+import threading
+import traceback
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QTextEdit, QLineEdit, QLabel, QSizePolicy, QMessageBox,
@@ -94,6 +96,12 @@ def safe_print(msg):
             print(msg.encode("ascii", errors="replace").decode("ascii"))
         except Exception:
             pass
+
+def global_exception_handler(exctype, value, tb):
+    err = "".join(traceback.format_exception(exctype, value, tb))
+    safe_print(f"⚠️ Đã chặn crash giao diện: {err}")
+
+sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
 APP_VERSION = "1.3.0"
@@ -2593,83 +2601,94 @@ class MainWindow(QWidget):
         )
         self.connect_vpn_us_background(profile_name, api_url)
 
-    def trigger_change_name_avatar(self):
+    def trigger_change_name_avatar(self, *args):
         """Kích hoạt đổi Tên Nick và Avatar trên Profile GPM đang mở hoặc mở mới."""
-        profile_name = self.gpm_profile_input.text().strip()
-        api_url = self.gpm_api_input.text().strip()
-        if not profile_name:
-            self.log_output.append("⚠️ Vui lòng nhập tên profile GPM, ví dụ US-45-1.")
-            return
-        if not api_url:
-            self.log_output.append("⚠️ Vui lòng nhập địa chỉ GPM Local API.")
-            return
-        if not api_url.startswith(("http://", "https://")):
-            self.log_output.append("⚠️ GPM Local API phải bắt đầu bằng http:// hoặc https://.")
-            return
+        try:
+            profile_name = self.gpm_profile_input.text().strip()
+            api_url = self.gpm_api_input.text().strip()
+            if not profile_name:
+                self.log_output.append("⚠️ Vui lòng nhập tên profile GPM, ví dụ US-45-1.")
+                return
+            if not api_url:
+                self.log_output.append("⚠️ Vui lòng nhập địa chỉ GPM Local API.")
+                return
+            if not api_url.startswith(("http://", "https://")):
+                self.log_output.append("⚠️ GPM Local API phải bắt đầu bằng http:// hoặc https://.")
+                return
 
-        do_nick = self.cb_change_nickname.isChecked()
-        do_avatar = self.cb_change_avatar.isChecked()
+            do_nick = self.cb_change_nickname.isChecked()
+            do_avatar = self.cb_change_avatar.isChecked()
 
-        if not do_nick and not do_avatar:
-            self.log_output.append("⚠️ Cả 2 tùy chọn 'Đổi tên nick' và 'Đổi Avatar' đều đang tắt. Hãy tích chọn ít nhất 1 mục!")
-            return
+            if not do_nick and not do_avatar:
+                self.log_output.append("⚠️ Cả 2 tùy chọn 'Đổi tên nick' và 'Đổi Avatar' đều đang tắt. Hãy tích chọn ít nhất 1 mục!")
+                return
 
-        chosen_nick = get_random_nickname() if do_nick else None
-        chosen_avatar = get_random_avatar() if do_avatar else None
+            chosen_nick = get_random_nickname() if do_nick else None
+            chosen_avatar = get_random_avatar() if do_avatar else None
 
-        if do_nick and not chosen_nick and do_avatar and not chosen_avatar:
-            self.log_output.append("⚠️ File nicknames.txt và thư mục avatars/ đều trống!")
-            return
+            if do_nick and not chosen_nick and do_avatar and not chosen_avatar:
+                self.log_output.append("⚠️ File nicknames.txt và thư mục avatars/ đều trống!")
+                return
 
-        self.log_output.append(f"🚀 [Bấm Đổi Tên + Avatar] Profile: {profile_name}...")
-        if do_nick:
-            if chosen_nick:
-                self.log_output.append(f"🎯 [TikTok] Tên nick ngẫu nhiên: '{chosen_nick}'")
-            else:
-                self.log_output.append("ℹ️ [TikTok] File nicknames.txt trống, không đổi tên.")
+            self.log_output.append(f"🚀 [Bấm Đổi Tên + Avatar] Profile: {profile_name}...")
+            if do_nick:
+                if chosen_nick:
+                    self.log_output.append(f"🎯 [TikTok] Tên nick ngẫu nhiên: '{chosen_nick}'")
+                else:
+                    self.log_output.append("ℹ️ [TikTok] File nicknames.txt trống, không đổi tên.")
 
-        if do_avatar:
-            if chosen_avatar:
-                self.log_output.append(f"🖼️ [TikTok] Ảnh avatar ngẫu nhiên: '{os.path.basename(chosen_avatar)}'")
-            else:
-                self.log_output.append("ℹ️ [TikTok] Thư mục avatars/ trống, không đổi avatar.")
+            if do_avatar:
+                if chosen_avatar:
+                    self.log_output.append(f"🖼️ [TikTok] Ảnh avatar ngẫu nhiên: '{os.path.basename(chosen_avatar)}'")
+                else:
+                    self.log_output.append("ℹ️ [TikTok] Thư mục avatars/ trống, không đổi avatar.")
 
-        def run_change():
-            try:
-                api = api_url.rstrip('/')
-                self.background_log_signal.emit(f"🧭 [GPM] Đang kiểm tra profile: {profile_name}...")
-                
-                # Tìm profile
-                response = requests.get(f"{api}/profiles", params={"page": 1, "page_size": 100}, timeout=15)
-                response.raise_for_status()
-                payload = response.json()
-                profiles = payload.get("data") or []
-                target = next((p for p in profiles if str(p.get("name", "")).strip() == profile_name.strip()), None)
-                
-                if not target:
-                    self.background_log_signal.emit(f"❌ [GPM] Không tìm thấy profile: {profile_name}")
-                    return
+            def run_change():
+                nonlocal api_url
+                try:
+                    if not is_gpm_running():
+                        self.background_log_signal.emit("⚠️ Phát hiện GPMLogin chưa mở -> Đang tự động mở và giải License...")
+                        new_api = auto_detect_or_launch_gpm(log_func=self.background_log_signal.emit)
+                        if new_api:
+                            api_url = new_api
+                            self.gpm_api_detected_signal.emit(new_api)
 
-                # Mở profile nếu chưa mở để lấy remote_debugging_address
-                self.background_log_signal.emit(f"🚀 [GPM] Đang kết nối tới profile {profile_name}...")
-                start_res = requests.get(f"{api}/profiles/start/{target['id']}", timeout=30)
-                start_res.raise_for_status()
-                start_payload = start_res.json()
-                if not start_payload.get("success"):
-                    raise RuntimeError(start_payload.get("message", "GPM từ chối mở profile"))
+                    api = api_url.rstrip('/')
+                    self.background_log_signal.emit(f"🧭 [GPM] Đang kiểm tra profile: {profile_name}...")
+                    
+                    # Tìm profile
+                    response = requests.get(f"{api}/profiles", params={"page": 1, "page_size": 100}, timeout=15)
+                    response.raise_for_status()
+                    payload = response.json()
+                    profiles = payload.get("data") or []
+                    target = next((p for p in profiles if str(p.get("name", "")).strip() == profile_name.strip()), None)
+                    
+                    if not target:
+                        self.background_log_signal.emit(f"❌ [GPM] Không tìm thấy profile: {profile_name}")
+                        return
 
-                remote_address = (start_payload.get("data") or {}).get("remote_debugging_address")
-                if not remote_address:
-                    raise RuntimeError("GPM không trả về remote_debugging_address")
+                    # Mở profile nếu chưa mở để lấy remote_debugging_address
+                    self.background_log_signal.emit(f"🚀 [GPM] Đang kết nối tới profile {profile_name}...")
+                    start_res = requests.get(f"{api}/profiles/start/{target['id']}", timeout=30)
+                    start_res.raise_for_status()
+                    start_payload = start_res.json()
+                    if not start_payload.get("success"):
+                        raise RuntimeError(start_payload.get("message", "GPM từ chối mở profile"))
 
-                if not remote_address.startswith(("http://", "https://")):
-                    remote_address = f"http://{remote_address}"
+                    remote_address = (start_payload.get("data") or {}).get("remote_debugging_address")
+                    if not remote_address:
+                        raise RuntimeError("GPM không trả về remote_debugging_address")
 
-                self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar)
-            except Exception as ex:
-                self.background_log_signal.emit(f"❌ [Đổi Tên+Avatar] Lỗi: {str(ex)}")
+                    if not remote_address.startswith(("http://", "https://")):
+                        remote_address = f"http://{remote_address}"
 
-        threading.Thread(target=run_change, daemon=True).start()
+                    self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar)
+                except Exception as ex:
+                    self.background_log_signal.emit(f"❌ [Đổi Tên+Avatar] Lỗi: {str(ex)}")
+
+            threading.Thread(target=run_change, daemon=True).start()
+        except Exception as err:
+            self.log_output.append(f"❌ [Lỗi giao diện]: {str(err)}")
 
     def advance_gpm_profile(self):
         """US-45-1 ... US-45-5 -> US-46-1; luôn đọc giá trị hiện tại trên GUI."""
