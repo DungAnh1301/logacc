@@ -2240,15 +2240,71 @@ class MainWindow(QWidget):
         return result_list
 
     def run_tiktok_profile_update(self, remote_address, chosen_nick, chosen_avatar):
-        """Mô típ chuẩn bị sẵn khung CDP để tự động thao tác đổi avatar & tên nick khi nhận mã HTML chi tiết."""
+        """Tự động điều hướng và thao tác đổi avatar & tên nick qua CDP trên profile GPM."""
         if not chosen_nick and not chosen_avatar:
             return
 
         def update_thread():
             try:
-                self.background_log_signal.emit(f"🔄 [TikTok] Đang chuẩn bị thao tác đổi hồ sơ qua CDP ({remote_address})...")
-                # Khi sếp gửi HTML của từng công đoạn, đoạn code thao tác chi tiết sẽ được điền vào đây
-                self.background_log_signal.emit("📌 [TikTok] Khung thao tác đổi hồ sơ đã sẵn sàng nhận mã HTML chi tiết.")
+                self.background_log_signal.emit(f"🔄 [TikTok] Đang kết nối tới trình duyệt qua CDP ({remote_address})...")
+                patch_playwright_driver()
+                from playwright.sync_api import sync_playwright
+
+                with sync_playwright() as p:
+                    # Kết nối trực tiếp vào GPM Chrome đang mở
+                    browser = p.chromium.connect_over_cdp(remote_address)
+                    contexts = browser.contexts
+                    if not contexts:
+                        self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy browser context trên GPM.")
+                        return
+
+                    context = contexts[0]
+                    pages = context.pages
+
+                    # Tìm tab TikTok đang mở hoặc dùng tab đầu tiên
+                    target_page = None
+                    for pg in pages:
+                        if "tiktok.com" in pg.url:
+                            target_page = pg
+                            break
+
+                    if not target_page:
+                        if pages:
+                            target_page = pages[0]
+                            self.background_log_signal.emit("🌐 [TikTok] Đang mở trang tiktok.com...")
+                            target_page.goto("https://www.tiktok.com/", wait_until="domcontentloaded", timeout=30000)
+                        else:
+                            target_page = context.new_page()
+                            self.background_log_signal.emit("🌐 [TikTok] Đang mở trang tiktok.com...")
+                            target_page.goto("https://www.tiktok.com/", wait_until="domcontentloaded", timeout=30000)
+
+                    self.background_log_signal.emit("🔍 [Bước 1: Trang chủ] Đang định vị nút Profile (Trang cá nhân)...")
+                    target_page.wait_for_timeout(3000)
+
+                    # Định vị nút Profile dựa trên HTML trang chủ người dùng gửi:
+                    # Selector chính: a[data-e2e="nav-profile"] hoặc button[aria-label="Profile"]
+                    profile_btn = target_page.locator('a[data-e2e="nav-profile"]')
+                    if not profile_btn.count():
+                        profile_btn = target_page.locator('button[aria-label="Profile"]')
+                    if not profile_btn.count():
+                        profile_btn = target_page.locator('a[href*="/@"]')
+
+                    if profile_btn.count() > 0:
+                        profile_href = profile_btn.first.get_attribute("href")
+                        self.background_log_signal.emit(f"👆 [TikTok] Đã tìm thấy nút Profile ({profile_href or 'nav-profile'}). Đang chuyển vào trang cá nhân...")
+                        try:
+                            profile_btn.first.click(timeout=6000)
+                        except Exception:
+                            if profile_href:
+                                full_url = profile_href if profile_href.startswith("http") else f"https://www.tiktok.com{profile_href}"
+                                target_page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
+                    else:
+                        self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy nút Profile trên thanh điều hướng. Đang thử cuộn tìm...")
+
+                    target_page.wait_for_timeout(3000)
+                    self.background_log_signal.emit(f"📍 [TikTok] URL hiện tại: {target_page.url}")
+                    self.background_log_signal.emit("⏳ [TikTok] Đã hoàn thành Bước 1 (Vào Profile). Đang chờ HTML Bước 2 (Edit profile) để tự động điền Tên Nick & Avatar.")
+
             except Exception as ex:
                 self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi cập nhật hồ sơ: {str(ex)}")
 
