@@ -2296,15 +2296,21 @@ class MainWindow(QWidget):
                         clicked_nav = False
                         if profile_btn.count() > 0:
                             profile_href = profile_btn.first.get_attribute("href")
-                            self.background_log_signal.emit(f"👆 [TikTok] Tìm thấy nút Profile bên trái ({profile_href or 'nav-profile'}). Đang chuyển hướng...")
+                            self.background_log_signal.emit(f"👆 [TikTok] Tìm thấy nút Profile ({profile_href or 'nav-profile'}). Đang chuyển hướng...")
                             try:
-                                profile_btn.first.click(timeout=5000)
-                                clicked_nav = True
-                            except Exception:
                                 if profile_href:
                                     full_url = profile_href if profile_href.startswith("http") else f"https://www.tiktok.com{profile_href}"
                                     target_page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
                                     clicked_nav = True
+                                else:
+                                    profile_btn.first.click(timeout=5000)
+                                    clicked_nav = True
+                            except Exception:
+                                try:
+                                    profile_btn.first.click(timeout=5000)
+                                    clicked_nav = True
+                                except Exception:
+                                    pass
 
                         # Cách 2: Nếu chưa vào được, bấm vào Avatar góc trên bên phải (header-more-menu-icon)
                         if not clicked_nav and "/@" not in target_page.url:
@@ -2658,14 +2664,6 @@ class MainWindow(QWidget):
 
                 if not remote_address.startswith(("http://", "https://")):
                     remote_address = f"http://{remote_address}"
-
-                # Mở tab TikTok nếu cần
-                time.sleep(1)
-                try:
-                    open_url = f"{remote_address}/json/new?{urllib.parse.quote('https://www.tiktok.com/', safe=':/')}"
-                    requests.put(open_url, timeout=10)
-                except Exception:
-                    pass
 
                 self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar)
             except Exception as ex:
