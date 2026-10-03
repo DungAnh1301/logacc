@@ -2757,11 +2757,47 @@ class MainWindow(QWidget):
                                 if click_save_dialog("Avatar"):
                                     self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất gửi lệnh lưu Avatar!")
                                     
-                                    # KIỂM TRA RIÊNG AVATAR (CHECK AVATAR)
-                                    self.background_log_signal.emit("🔍 [TikTok] [Kiểm tra Avatar] Đang kiểm tra xem ảnh đại diện đã cập nhật chưa...")
+                                    # KIỂM TRA RIÊNG AVATAR (CHECK AVATAR: Kiểm tra khác avatar mặc định)
+                                    self.background_log_signal.emit("🔍 [TikTok] [Kiểm tra Avatar] Đang kiểm tra xem ảnh đại diện đã KHÁC avatar mặc định chưa...")
                                     for check_av in range(1, 4):
                                         target_page.wait_for_timeout(2000)
+                                        is_not_default = False
                                         current_avatar_src = ""
+                                        try:
+                                            is_not_default = target_page.evaluate('''() => {
+                                                const container = document.querySelector('[data-e2e="user-avatar"], div[class*="AvatarContainer"], span[class*="SpanAvatar"]');
+                                                if (!container) {
+                                                    const anyAvt = document.querySelector('img[class*="Avatar"], img[class*="avatar"]');
+                                                    if (anyAvt) {
+                                                        const s = (anyAvt.currentSrc || anyAvt.src || '').toLowerCase();
+                                                        return !s.includes('default') && (s.includes('tiktokcdn') || s.includes('avt') || s.includes('http'));
+                                                    }
+                                                    return false;
+                                                }
+
+                                                // 1. Nếu container chỉ chứa icon SVG bóng người mặc định mà không có thẻ img
+                                                const hasSvgOnly = container.querySelector('svg') && !container.querySelector('img');
+                                                if (hasSvgOnly) return false;
+
+                                                // 2. Tìm thẻ img
+                                                const img = container.querySelector('img') || document.querySelector('img[class*="ImgAvatar"]');
+                                                if (!img) return false;
+
+                                                const src = (img.currentSrc || img.src || '').toLowerCase();
+                                                if (!src || src.startsWith('data:image/svg')) return false;
+
+                                                // 3. Loại trừ các từ khóa ảnh placeholder mặc định
+                                                const defaultKeywords = ['default-avatar', 'avatar-default', 'musically-default', 'default_avatar', 'headshot', 'placeholder'];
+                                                for (const kw of defaultKeywords) {
+                                                    if (src.includes(kw)) return false;
+                                                }
+
+                                                // 4. Nếu có link ảnh thực tế trên CDN hoặc link http hợp lệ
+                                                return src.includes('tiktokcdn') || src.includes('avt') || src.includes('image') || src.startsWith('http');
+                                            }''')
+                                        except Exception:
+                                            pass
+
                                         try:
                                             current_avatar_src = target_page.evaluate('''() => {
                                                 const img = document.querySelector('[data-e2e="user-avatar"] img, div[class*="AvatarContainer"] img, span[class*="SpanAvatar"] img, img[class*="ImgAvatar"]');
@@ -2770,12 +2806,13 @@ class MainWindow(QWidget):
                                         except Exception:
                                             pass
 
-                                        if current_avatar_src and (old_avatar_src == "" or current_avatar_src != old_avatar_src):
+                                        # Điều kiện thành công: Đã là ảnh cá nhân (khác mặc định) HOẶC src đã thay đổi so với src ban đầu
+                                        if is_not_default or (current_avatar_src and old_avatar_src and current_avatar_src != old_avatar_src):
                                             avatar_success = True
-                                            self.background_log_signal.emit("✅ [TikTok] [Kiểm tra Avatar] Đã xác nhận: Ảnh đại diện đã được cập nhật thành công trên trang cá nhân!")
+                                            self.background_log_signal.emit("✅ [TikTok] [Kiểm tra Avatar] Đã xác nhận: Ảnh đại diện đã được cập nhật (đã khác avatar mặc định)!")
                                             break
                                         else:
-                                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_av}/3) Kiểm tra Avatar chưa thấy đổi, đang F5 (Reload) lại trang...")
+                                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_av}/3) Avatar chưa đổi (vẫn là mặc định), đang F5 (Reload) lại trang...")
                                             try:
                                                 target_page.reload(wait_until="domcontentloaded", timeout=25000)
                                                 target_page.wait_for_timeout(3500)
@@ -2783,7 +2820,7 @@ class MainWindow(QWidget):
                                                 self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
 
                                     if not avatar_success:
-                                        self.background_log_signal.emit("⚠️ [TikTok] [Kiểm tra Avatar] Đã F5 3 lần (máy chủ TikTok có thể đang cache ảnh), lệnh lưu Avatar đã hoàn tất.")
+                                        self.background_log_signal.emit("⚠️ [TikTok] [Kiểm tra Avatar] Đã F5 3 lần nhưng chưa thấy ảnh mới, TikTok có thể đang duyệt ảnh hoặc cache CDN.")
                                         avatar_success = True
                                 else:
                                     self.background_log_signal.emit("⚠️ [TikTok] Không thể bấm lưu Avatar.")
