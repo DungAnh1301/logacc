@@ -1480,6 +1480,48 @@ def fetch_all_gpm_profiles(api_url):
         pass
     return profiles_dict
 
+def find_gpm_profile(api_url, profile_name):
+    """Tìm profile trên GPM theo tên: ưu tiên dùng search của GPM API v3, nếu không thấy sẽ phân trang quét toàn bộ."""
+    if not profile_name or not api_url:
+        return None
+    base_url = get_gpm_base_url(api_url)
+    target_name = profile_name.strip().lower()
+
+    # 1. Thử tìm kiếm trực tiếp bằng tham số search qua API v3 (tốc độ cao 50ms)
+    endpoints = [f"{base_url}/api/v3/profiles", f"{api_url.rstrip('/')}/profiles"]
+    for ep in endpoints:
+        try:
+            r = requests.get(ep, params={"search": profile_name.strip()}, timeout=10)
+            if r.status_code == 200:
+                data = r.json().get("data") or []
+                match = next((p for p in data if str(p.get("name", "")).strip().lower() == target_name), None)
+                if match:
+                    return match
+        except Exception:
+            pass
+
+    # 2. Phân trang tìm kiếm nếu search không ra (hỗ trợ tài khoản có nhiều trang profile)
+    try:
+        page = 1
+        while True:
+            r = requests.get(f"{base_url}/api/v3/profiles", params={"page": page, "page_size": 100}, timeout=10)
+            if r.status_code != 200:
+                break
+            payload = r.json()
+            batch = payload.get("data") or []
+            if not batch:
+                break
+            match = next((p for p in batch if str(p.get("name", "")).strip().lower() == target_name), None)
+            if match:
+                return match
+            total = (payload.get("pagination") or {}).get("total", 0)
+            if len(batch) < 100 or (total and page * 100 >= total):
+                break
+            page += 1
+    except Exception:
+        pass
+    return None
+
 def create_single_gpm_profile(api_url, name, group="All", proxy="", canvas=True, font=True, webrtc=True, client_rect=True, webgl=True, audio=True):
     """Tạo 1 profile mới trên GPM với đầy đủ 4 chế độ Noise (Canvas, ClientRect, WebGL, Audio) đều ON"""
     base_url = get_gpm_base_url(api_url)
@@ -2482,33 +2524,7 @@ class MainWindow(QWidget):
         api_url = api_url.rstrip('/')
         try:
             self.background_log_signal.emit(f"🧭 [Bước 3] Đang tìm profile GPM: {profile_name}")
-            profiles = []
-            page_number = 1
-            page_size = 50
-
-            while True:
-                response = requests.get(
-                    f"{api_url}/profiles",
-                    params={"page": page_number, "page_size": page_size},
-                    timeout=15
-                )
-                response.raise_for_status()
-                payload = response.json()
-                if not payload.get("success"):
-                    raise RuntimeError(payload.get("message", "GPM API trả về thất bại"))
-
-                batch = payload.get("data") or []
-                profiles.extend(batch)
-                total = (payload.get("pagination") or {}).get("total", 0)
-                if not batch or len(batch) < page_size or (total and len(profiles) >= total):
-                    break
-                page_number += 1
-
-            target = next(
-                (profile for profile in profiles
-                 if str(profile.get("name", "")).strip() == profile_name.strip()),
-                None
-            )
+            target = find_gpm_profile(api_url, profile_name)
             if not target:
                 self.background_log_signal.emit(f"⚡ Profile '{profile_name}' chưa có trên GPM -> Đang tự động gọi API tạo mới...")
                 # Tự đoán group từ prefix tên (vd US-45-1 -> US, RU-10-1 -> RU, PK-1-1 -> PK)
@@ -2657,12 +2673,7 @@ class MainWindow(QWidget):
                     self.background_log_signal.emit(f"🧭 [GPM] Đang kiểm tra profile: {profile_name}...")
                     
                     # Tìm profile
-                    response = requests.get(f"{api}/profiles", params={"page": 1, "page_size": 100}, timeout=15)
-                    response.raise_for_status()
-                    payload = response.json()
-                    profiles = payload.get("data") or []
-                    target = next((p for p in profiles if str(p.get("name", "")).strip() == profile_name.strip()), None)
-                    
+                    target = find_gpm_profile(api, profile_name)
                     if not target:
                         self.background_log_signal.emit(f"❌ [GPM] Không tìm thấy profile: {profile_name}")
                         return
