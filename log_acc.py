@@ -13,7 +13,8 @@ import shutil
 import importlib.util
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QPushButton, QTextEdit, QLineEdit, QLabel, QSizePolicy, QMessageBox)
+                             QPushButton, QTextEdit, QLineEdit, QLabel, QSizePolicy, QMessageBox,
+                             QComboBox, QDialog, QCheckBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QTextCursor
 
@@ -93,7 +94,7 @@ def safe_print(msg):
             pass
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -411,8 +412,12 @@ def generate_fake_fingerprint():
     }
 
 
-async def process_single_account(raw_input_str, email, password, recovery_acc, log_signal, result_signal, pause_event):
+async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
     await pause_event.wait()
+    if isinstance(recovery_list, str):
+        recovery_list = [recovery_list] if recovery_list.strip() else []
+    elif not recovery_list:
+        recovery_list = []
 
     CLIENT_ID = "b849bc72-dc2c-492f-b087-71e84e926496"
     REDIRECT_URI = "https://login.microsoftonline.com/common/oauth2/nativeclient"
@@ -758,82 +763,157 @@ async def process_single_account(raw_input_str, email, password, recovery_acc, l
                 )
 
                 if is_new_recovery_flow:
-                    recovery_email = recovery_acc.split('|')[0].strip()
                     log_signal.emit("🛡️ Phát hiện luồng bảo mật Fluent mới...")
-                    try:
-                        # Ở trang Help protect, phải bấm Add email để mở ô nhập.
-                        if not await new_recovery_input.is_visible():
-                            add_email_button = page.get_by_role(
-                                "button", name=re.compile(r"^Add email$", re.I)
-                            )
-                            await add_email_button.click(timeout=10000)
-                            await page.wait_for_selector(
-                                "#floatingLabelInput10",
-                                state="visible",
-                                timeout=15000
-                            )
+                    if not recovery_list:
+                        log_signal.emit("⚠️ Không có email khôi phục nào trong danh sách!")
+                        break
 
-                        log_signal.emit(f"📧 Đang thêm email khôi phục: {recovery_email}")
-                        await new_recovery_input.fill(recovery_email)
+                    recovery_success = False
+                    for rec_idx, cur_recovery in enumerate(recovery_list):
+                        rec_email = cur_recovery.split('|')[0].strip() if '|' in cur_recovery else cur_recovery.strip()
+                        if not rec_email:
+                            continue
 
-                        # HTML hiện tại: <button data-testid="primaryButton">Next</button>
-                        # Dùng data-testid ổn định, không dùng class Fluent (hay thay đổi).
-                        await new_primary_button.wait_for(state="visible", timeout=10000)
-                        await new_primary_button.click(timeout=10000)
-
-                        await page.wait_for_selector(
-                            "#codeEntry-0",
-                            state="visible",
-                            timeout=15000
-                        )
-                        log_signal.emit("⏳ Đang đợi OTP cho luồng bảo mật mới...")
-                        otp_code = get_outlook_otp_via_api(recovery_acc, log_signal)
-                        if otp_code:
-                            otp_digits = str(otp_code).strip()
-                            otp_inputs = page.locator("input[id^='codeEntry-']")
-                            input_count = await otp_inputs.count()
-                            if len(otp_digits) != input_count:
-                                raise RuntimeError(
-                                    f"OTP có {len(otp_digits)} số nhưng trang yêu cầu {input_count} số"
+                        log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
+                        try:
+                            # Ở trang Help protect, phải bấm Add email để mở ô nhập.
+                            if not await new_recovery_input.is_visible():
+                                add_email_button = page.get_by_role(
+                                    "button", name=re.compile(r"^Add email$", re.I)
                                 )
+                                if await add_email_button.count() > 0:
+                                    await add_email_button.click(timeout=10000)
+                                    await page.wait_for_selector(
+                                        "#floatingLabelInput10",
+                                        state="visible",
+                                        timeout=15000
+                                    )
 
-                            for index, digit in enumerate(otp_digits):
-                                await page.fill(f"#codeEntry-{index}", digit)
+                            await new_recovery_input.fill("")
+                            await new_recovery_input.fill(rec_email)
 
-                            log_signal.emit("✅ Đã điền OTP vào 6 ô của giao diện mới.")
-                            await asyncio.sleep(4)
-                        else:
-                            log_signal.emit("❌ Không lấy được OTP cho giao diện bảo mật mới.")
-                    except Exception as e:
-                        log_signal.emit(f"⚠️ Lỗi xử lý luồng Add email mới: {str(e)}")
+                            await new_primary_button.wait_for(state="visible", timeout=10000)
+                            await new_primary_button.click(timeout=10000)
+
+                            # Chờ xem có xuất hiện ô OTP không
+                            otp_appeared = False
+                            for _ in range(8):
+                                await pause_event.wait()
+                                if await page.is_visible("#codeEntry-0"):
+                                    otp_appeared = True
+                                    break
+                                await asyncio.sleep(1)
+
+                            if not otp_appeared:
+                                log_signal.emit(f"⚠️ Email {rec_email} không xuất hiện ô OTP (có thể bị giới hạn hoặc lỗi).")
+                                if rec_idx + 1 < len(recovery_list):
+                                    log_signal.emit("🔄 Đang thử quay lại để đổi sang email khôi phục tiếp theo...")
+                                    btn_back = page.locator("button:has-text('Back'), #idBtn_Back, button[aria-label='Back']")
+                                    if await btn_back.count() > 0:
+                                        await btn_back.first.click(timeout=3000)
+                                        await asyncio.sleep(2)
+                                continue
+
+                            log_signal.emit(f"⏳ Đang đợi OTP cho email {rec_email}...")
+                            otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
+                            if otp_code:
+                                otp_digits = str(otp_code).strip()
+                                otp_inputs = page.locator("input[id^='codeEntry-']")
+                                input_count = await otp_inputs.count()
+                                if len(otp_digits) != input_count:
+                                    raise RuntimeError(
+                                        f"OTP có {len(otp_digits)} số nhưng trang yêu cầu {input_count} số"
+                                    )
+
+                                for index, digit in enumerate(otp_digits):
+                                    await page.fill(f"#codeEntry-{index}", digit)
+
+                                log_signal.emit(f"✅ Đã điền OTP vào 6 ô từ email {rec_email} thành công.")
+                                await asyncio.sleep(4)
+                                recovery_success = True
+                                break
+                            else:
+                                log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
+                                if rec_idx + 1 < len(recovery_list):
+                                    log_signal.emit("🔄 Đang tự động đổi sang email khôi phục tiếp theo trong list...")
+                                    btn_back = page.locator("button:has-text('Back'), #idBtn_Back, a:has-text('Back'), a:has-text('Cancel')")
+                                    if await btn_back.count() > 0:
+                                        await btn_back.first.click(timeout=3000)
+                                        await asyncio.sleep(2)
+                        except Exception as e:
+                            log_signal.emit(f"⚠️ Lỗi xử lý email {rec_email}: {str(e)}")
+                            if rec_idx + 1 < len(recovery_list):
+                                continue
+
+                    if not recovery_success:
+                        log_signal.emit("⚠️ Đã thử hết danh sách email khôi phục.")
                     break
                  
                 # Kiểm tra nếu dính màn hình bắt buộc nhập email khôi phục ("Let's protect your account")
                 if "protect your account" in content.lower() or await page.is_visible("#EmailAddress"):
-                    log_signal.emit(f"🛡️ Phát hiện yêu cầu thêm email khôi phục. Đang điền...")
-                    try:
-                        recovery_email = recovery_acc.split('|')[0].strip()
-                        log_signal.emit(f"📧 Email khôi phục: {recovery_email}")
-                        await page.wait_for_selector("#EmailAddress", state="visible", timeout=10000)
-                        await page.fill("#EmailAddress", recovery_email)
-                        await asyncio.sleep(1)
-                        await page.click("#iNext")
-                        await asyncio.sleep(3)
-                        
-                        # Bắt mã OTP
-                        log_signal.emit(f"⏳ Đang đợi mã OTP từ email khôi phục...")
-                        for _ in range(20):
-                            await pause_event.wait()
+                    log_signal.emit(f"🛡️ Phát hiện yêu cầu thêm email khôi phục (giao diện cũ)...")
+                    if not recovery_list:
+                        log_signal.emit("⚠️ Không có email khôi phục nào trong danh sách!")
+                        break
+
+                    recovery_success = False
+                    for rec_idx, cur_recovery in enumerate(recovery_list):
+                        rec_email = cur_recovery.split('|')[0].strip() if '|' in cur_recovery else cur_recovery.strip()
+                        if not rec_email:
+                            continue
+
+                        log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
+                        try:
+                            await page.wait_for_selector("#EmailAddress", state="visible", timeout=10000)
+                            await page.fill("#EmailAddress", "")
+                            await page.fill("#EmailAddress", rec_email)
                             await asyncio.sleep(1)
-                            if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
-                                otp_code = get_outlook_otp_via_api(recovery_acc, log_signal)
-                                if otp_code:
-                                    await page.fill("input[type='tel'], input[name='otc'], input[id*='otc']", otp_code)
-                                    await page.click("#iNext, #idSIButton9")
-                                    await asyncio.sleep(3)
+                            await page.click("#iNext")
+                            await asyncio.sleep(3)
+                            
+                            # Chờ ô nhập OTP
+                            otp_appeared = False
+                            for _ in range(8):
+                                await pause_event.wait()
+                                if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
+                                    otp_appeared = True
                                     break
-                    except Exception as e:
-                        log_signal.emit(f"⚠️ Lỗi xử lý bảo mật: {str(e)}")
+                                await asyncio.sleep(1)
+
+                            if not otp_appeared:
+                                log_signal.emit(f"⚠️ Email {rec_email} không mở được ô nhập OTP.")
+                                if rec_idx + 1 < len(recovery_list):
+                                    btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
+                                    if await btn_back.count() > 0:
+                                        await btn_back.first.click(timeout=3000)
+                                        await asyncio.sleep(2)
+                                continue
+
+                            # Bắt mã OTP
+                            log_signal.emit(f"⏳ Đang đợi mã OTP từ email: {rec_email}...")
+                            otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
+                            if otp_code:
+                                await page.fill("input[type='tel'], input[name='otc'], input[id*='otc']", otp_code)
+                                await page.click("#iNext, #idSIButton9")
+                                await asyncio.sleep(3)
+                                recovery_success = True
+                                log_signal.emit(f"✅ Đã điền OTP thành công cho email: {rec_email}")
+                                break
+                            else:
+                                log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
+                                if rec_idx + 1 < len(recovery_list):
+                                    log_signal.emit("🔄 Đang thử quay lại để đổi email khôi phục tiếp theo...")
+                                    btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
+                                    if await btn_back.count() > 0:
+                                        await btn_back.first.click(timeout=3000)
+                                        await asyncio.sleep(2)
+                        except Exception as e:
+                            log_signal.emit(f"⚠️ Lỗi thử email {rec_email}: {str(e)}")
+                            if rec_idx + 1 < len(recovery_list):
+                                continue
+
+                    if not recovery_success:
+                        log_signal.emit("⚠️ Đã thử hết danh sách email khôi phục.")
                     break
 
                 if "code=" in page.url or await page.is_visible("button:has-text('Accept')") or "consent" in page.url.lower():
@@ -952,10 +1032,16 @@ class AutomationWorker(QThread):
     result_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
-    def __init__(self, target_acc, recovery_acc):
+    def __init__(self, target_acc, recovery_list):
         super().__init__()
         self.target_acc = target_acc
-        self.recovery_acc = recovery_acc
+        if isinstance(recovery_list, list):
+            self.recovery_list = recovery_list
+        elif recovery_list:
+            self.recovery_list = [recovery_list]
+        else:
+            self.recovery_list = []
+        self.recovery_acc = self.recovery_list[0] if self.recovery_list else ""
         self.loop = None
         self.pause_event = None
 
@@ -984,7 +1070,7 @@ class AutomationWorker(QThread):
         self.pause_event.set() 
 
         try:
-            loop.run_until_complete(process_single_account(self.target_acc, email, password, self.recovery_acc, self.log_signal, self.result_signal, self.pause_event))
+            loop.run_until_complete(process_single_account(self.target_acc, email, password, self.recovery_list, self.log_signal, self.result_signal, self.pause_event))
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -1008,6 +1094,159 @@ class AutomationWorker(QThread):
         if self.loop and self.loop.is_running():
             self.loop.stop()
 
+
+# ========================================================
+# QUẢN LÝ TỆP TIN & HỘP THOẠI DANH SÁCH (RECOVERY & TIKTOK)
+# ========================================================
+def get_app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+APP_DIR = get_app_dir()
+RECOVERY_EMAILS_FILE = os.path.join(APP_DIR, "recovery_emails.txt")
+NICKNAMES_FILE = os.path.join(APP_DIR, "nicknames.txt")
+AVATARS_DIR = os.path.join(APP_DIR, "avatars")
+
+os.makedirs(AVATARS_DIR, exist_ok=True)
+
+def load_recovery_emails():
+    if not os.path.isfile(RECOVERY_EMAILS_FILE):
+        return []
+    try:
+        with open(RECOVERY_EMAILS_FILE, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+    except Exception:
+        return []
+
+def save_recovery_emails(email_list):
+    try:
+        with open(RECOVERY_EMAILS_FILE, "w", encoding="utf-8") as f:
+            for item in email_list:
+                if item.strip():
+                    f.write(item.strip() + "\n")
+    except Exception as e:
+        safe_print(f"Lỗi lưu recovery emails: {e}")
+
+def load_nicknames():
+    if not os.path.isfile(NICKNAMES_FILE):
+        return []
+    try:
+        with open(NICKNAMES_FILE, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+    except Exception:
+        return []
+
+def save_nicknames(nick_list):
+    try:
+        with open(NICKNAMES_FILE, "w", encoding="utf-8") as f:
+            for item in nick_list:
+                if item.strip():
+                    f.write(item.strip() + "\n")
+    except Exception as e:
+        safe_print(f"Lỗi lưu nicknames: {e}")
+
+def get_random_avatar():
+    if not os.path.isdir(AVATARS_DIR):
+        return None
+    valid_exts = (".png", ".jpg", ".jpeg", ".webp")
+    imgs = [os.path.join(AVATARS_DIR, f) for f in os.listdir(AVATARS_DIR) if f.lower().endswith(valid_exts)]
+    return random.choice(imgs) if imgs else None
+
+def get_random_nickname():
+    nicks = load_nicknames()
+    return random.choice(nicks) if nicks else None
+
+
+class RecoveryEmailsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quản Lý Danh Sách Email Khôi Phục")
+        self.resize(680, 480)
+        self.setStyleSheet("""
+            QDialog { background-color: #121212; color: #ffffff; }
+            QLabel { color: #e0e0e0; font-size: 13px; }
+            QTextEdit { background-color: #1e1e1e; color: #03dac6; border: 1px solid #333; border-radius: 4px; font-family: Consolas, monospace; font-size: 12px; }
+            QPushButton { border-radius: 4px; padding: 8px 16px; font-weight: bold; }
+        """)
+
+        layout = QVBoxLayout(self)
+        
+        lbl_info = QLabel("<b>Nhập danh sách email khôi phục (mỗi dòng: tk|mk|outh2|clientId):</b><br><span style='color: #888;'>Khi gặp lỗi (hết OTP, bị chặn), tool sẽ tự động thử lần lượt các email tiếp theo trong danh sách.</span>")
+        lbl_info.setWordWrap(True)
+        layout.addWidget(lbl_info)
+
+        self.text_edit = QTextEdit()
+        emails = load_recovery_emails()
+        self.text_edit.setPlainText("\n".join(emails))
+        layout.addWidget(self.text_edit)
+
+        btn_layout = QHBoxLayout()
+        self.btn_save = QPushButton("💾 Lưu Danh Sách")
+        self.btn_save.setStyleSheet("background-color: #00897b; color: white;")
+        self.btn_save.clicked.connect(self.save_and_close)
+
+        self.btn_cancel = QPushButton("Đóng")
+        self.btn_cancel.setStyleSheet("background-color: #424242; color: white;")
+        self.btn_cancel.clicked.connect(self.reject)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_save)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def save_and_close(self):
+        content = self.text_edit.toPlainText().strip()
+        lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
+        save_recovery_emails(lines)
+        QMessageBox.information(self, "Thông báo", f"Đã lưu thành công {len(lines)} email khôi phục!")
+        self.accept()
+
+
+class NicknamesDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quản Lý Danh Sách Tên Nick (Random)")
+        self.resize(500, 480)
+        self.setStyleSheet("""
+            QDialog { background-color: #121212; color: #ffffff; }
+            QLabel { color: #e0e0e0; font-size: 13px; }
+            QTextEdit { background-color: #1e1e1e; color: #ffcc80; border: 1px solid #333; border-radius: 4px; font-size: 13px; }
+            QPushButton { border-radius: 4px; padding: 8px 16px; font-weight: bold; }
+        """)
+
+        layout = QVBoxLayout(self)
+        
+        lbl_info = QLabel("<b>Nhập danh sách tên nick để đổi ngẫu nhiên trên TikTok (mỗi dòng 1 tên):</b><br><span style='color: #888;'>Nếu danh sách trống, tool sẽ tự động bỏ qua bước đổi tên nick.</span>")
+        lbl_info.setWordWrap(True)
+        layout.addWidget(lbl_info)
+
+        self.text_edit = QTextEdit()
+        nicks = load_nicknames()
+        self.text_edit.setPlainText("\n".join(nicks))
+        layout.addWidget(self.text_edit)
+
+        btn_layout = QHBoxLayout()
+        self.btn_save = QPushButton("💾 Lưu Danh Sách")
+        self.btn_save.setStyleSheet("background-color: #5c6bc0; color: white;")
+        self.btn_save.clicked.connect(self.save_and_close)
+
+        self.btn_cancel = QPushButton("Đóng")
+        self.btn_cancel.setStyleSheet("background-color: #424242; color: white;")
+        self.btn_cancel.clicked.connect(self.reject)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_save)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def save_and_close(self):
+        content = self.text_edit.toPlainText().strip()
+        lines = [line.strip() for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
+        save_nicknames(lines)
+        QMessageBox.information(self, "Thông báo", f"Đã lưu thành công {len(lines)} tên nick!")
+        self.accept()
+
 # --- GIAO DIỆN CHÍNH (GUI) ---
 class MainWindow(QWidget):
     background_log_signal = pyqtSignal(str)
@@ -1024,7 +1263,7 @@ class MainWindow(QWidget):
     def initUI(self):
         self.setWindowTitle(f'Get OAuth2 Token & Outlook Loader - Hao Automation (v{APP_VERSION})')
         self.setFixedWidth(750)
-        self.setFixedHeight(720)
+        self.setFixedHeight(770)
         self.setStyleSheet("""
             QWidget {
                 background-color: #121212;
@@ -1060,13 +1299,24 @@ class MainWindow(QWidget):
         acc_layout.addWidget(self.acc_input)
         main_layout.addLayout(acc_layout)
 
-        # Ô 2: Nhập email khôi phục (GIỮ NGUYÊN KHI STOP)
+        # Ô 2: Nhập / Chọn email khôi phục từ List
         recovery_layout = QHBoxLayout()
-        self.recovery_input = QLineEdit()
-        self.recovery_input.setPlaceholderText("Nhập email khôi phục dạng: tk|mk|outh2|clientId")
-        self.recovery_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 8px; border-radius: 4px; color: #03dac6;")
+        self.recovery_combo = QComboBox()
+        self.recovery_combo.setEditable(True)
+        self.recovery_combo.lineEdit().setPlaceholderText("Chọn hoặc nhập email khôi phục: tk|mk|outh2|clientId")
+        self.recovery_combo.setStyleSheet("""
+            QComboBox { background-color: #1e1e1e; border: 1px solid #333; padding: 6px; border-radius: 4px; color: #03dac6; font-size: 12px; }
+            QComboBox QAbstractItemView { background-color: #1e1e1e; color: #03dac6; selection-background-color: #00796b; }
+        """)
+        self.recovery_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.btn_manage_recovery = QPushButton("📋 Danh Sách Email")
+        self.btn_manage_recovery.setStyleSheet("padding: 8px 12px; background-color: #00796b; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_manage_recovery.clicked.connect(self.open_recovery_dialog)
+
         recovery_layout.addWidget(QLabel("<b>Email Khôi Phục:</b>"))
-        recovery_layout.addWidget(self.recovery_input)
+        recovery_layout.addWidget(self.recovery_combo, stretch=1)
+        recovery_layout.addWidget(self.btn_manage_recovery)
         main_layout.addLayout(recovery_layout)
 
         # Ô 3: Tên profile GPM cần mở sau khi VPN đã kết nối thành công
@@ -1088,6 +1338,32 @@ class MainWindow(QWidget):
         gpm_api_layout.addWidget(QLabel("<b>GPM Local API:</b>"))
         gpm_api_layout.addWidget(self.gpm_api_input)
         main_layout.addLayout(gpm_api_layout)
+
+        # Cấu hình TikTok Profile (Đổi avatar & tên nick)
+        tiktok_profile_layout = QHBoxLayout()
+        
+        self.cb_change_nickname = QCheckBox("Đổi tên nick TikTok")
+        self.cb_change_nickname.setChecked(True)
+        self.cb_change_nickname.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        
+        self.btn_manage_nicknames = QPushButton("📝 List Tên Nick")
+        self.btn_manage_nicknames.setStyleSheet("padding: 6px 12px; background-color: #5c6bc0; color: white; border-radius: 4px; font-weight: bold;")
+        self.btn_manage_nicknames.clicked.connect(self.open_nicknames_dialog)
+
+        self.cb_change_avatar = QCheckBox("Đổi Avatar TikTok")
+        self.cb_change_avatar.setChecked(True)
+        self.cb_change_avatar.setStyleSheet("color: #e0e0e0; font-weight: bold; margin-left: 15px;")
+        
+        self.btn_open_avatars_folder = QPushButton("📁 Thư mục Avatar")
+        self.btn_open_avatars_folder.setStyleSheet("padding: 6px 12px; background-color: #8d6e63; color: white; border-radius: 4px; font-weight: bold;")
+        self.btn_open_avatars_folder.clicked.connect(self.open_avatars_folder)
+
+        tiktok_profile_layout.addWidget(self.cb_change_nickname)
+        tiktok_profile_layout.addWidget(self.btn_manage_nicknames)
+        tiktok_profile_layout.addWidget(self.cb_change_avatar)
+        tiktok_profile_layout.addWidget(self.btn_open_avatars_folder)
+        tiktok_profile_layout.addStretch()
+        main_layout.addLayout(tiktok_profile_layout)
 
 
 
@@ -1188,6 +1464,72 @@ class MainWindow(QWidget):
         main_layout.addWidget(self.log_output)
 
         self.setLayout(main_layout)
+        self.refresh_recovery_combo()
+
+    def refresh_recovery_combo(self):
+        current_text = self.recovery_combo.currentText().strip()
+        self.recovery_combo.clear()
+        emails = load_recovery_emails()
+        for em in emails:
+            self.recovery_combo.addItem(em)
+        if current_text:
+            idx = self.recovery_combo.findText(current_text)
+            if idx >= 0:
+                self.recovery_combo.setCurrentIndex(idx)
+            else:
+                self.recovery_combo.setEditText(current_text)
+
+    def open_recovery_dialog(self):
+        dlg = RecoveryEmailsDialog(self)
+        if dlg.exec():
+            self.refresh_recovery_combo()
+            self.log_output.append(f"📋 Đã cập nhật danh sách email khôi phục ({len(load_recovery_emails())} email).")
+
+    def open_nicknames_dialog(self):
+        dlg = NicknamesDialog(self)
+        if dlg.exec():
+            nicks = load_nicknames()
+            self.log_output.append(f"📝 Đã cập nhật danh sách tên nick ({len(nicks)} tên).")
+
+    def open_avatars_folder(self):
+        os.makedirs(AVATARS_DIR, exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(AVATARS_DIR)
+            else:
+                subprocess.run(["xdg-open", AVATARS_DIR])
+            self.log_output.append(f"📁 Đã mở thư mục avatar: {AVATARS_DIR}")
+        except Exception as e:
+            self.log_output.append(f"⚠️ Không thể mở thư mục avatar: {e}")
+
+    def get_recovery_list(self):
+        current_input = self.recovery_combo.currentText().strip()
+        emails = load_recovery_emails()
+        
+        result_list = []
+        if current_input:
+            result_list.append(current_input)
+            
+        for em in emails:
+            if em not in result_list:
+                result_list.append(em)
+                
+        return result_list
+
+    def run_tiktok_profile_update(self, remote_address, chosen_nick, chosen_avatar):
+        """Mô típ chuẩn bị sẵn khung CDP để tự động thao tác đổi avatar & tên nick khi nhận mã HTML chi tiết."""
+        if not chosen_nick and not chosen_avatar:
+            return
+
+        def update_thread():
+            try:
+                self.background_log_signal.emit(f"🔄 [TikTok] Đang chuẩn bị thao tác đổi hồ sơ qua CDP ({remote_address})...")
+                # Khi sếp gửi HTML của từng công đoạn, đoạn code thao tác chi tiết sẽ được điền vào đây
+                self.background_log_signal.emit("📌 [TikTok] Khung thao tác đổi hồ sơ đã sẵn sàng nhận mã HTML chi tiết.")
+            except Exception as ex:
+                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi cập nhật hồ sơ: {str(ex)}")
+
+        threading.Thread(target=update_thread, daemon=True).start()
 
     def connect_vpn_us_background(self, profile_name, api_url):
         """Đổi VPN sang US; chỉ khi thành công mới mở đúng profile GPM."""
@@ -1295,6 +1637,29 @@ class MainWindow(QWidget):
             self.background_log_signal.emit(
                 f"✅ Đã mở profile {profile_name} và vào tiktok.com thành công."
             )
+
+            # Mô típ kiểm tra đổi tên nick & avatar TikTok
+            do_nick = self.cb_change_nickname.isChecked()
+            do_avatar = self.cb_change_avatar.isChecked()
+
+            if do_nick or do_avatar:
+                chosen_nick = get_random_nickname() if do_nick else None
+                chosen_avatar = get_random_avatar() if do_avatar else None
+
+                if do_nick:
+                    if chosen_nick:
+                        self.background_log_signal.emit(f"🎯 [TikTok] Tên nick ngẫu nhiên: '{chosen_nick}'")
+                    else:
+                        self.background_log_signal.emit("ℹ️ [TikTok] File nicknames.txt trống, bỏ qua đổi tên.")
+
+                if do_avatar:
+                    if chosen_avatar:
+                        avatar_name = os.path.basename(chosen_avatar)
+                        self.background_log_signal.emit(f"🖼️ [TikTok] Ảnh avatar ngẫu nhiên: '{avatar_name}'")
+                    else:
+                        self.background_log_signal.emit("ℹ️ [TikTok] Thư mục avatars/ trống, bỏ qua đổi avatar.")
+
+                self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar)
         except Exception as e:
             self.background_log_signal.emit(f"❌ [GPM] {str(e)}")
 
@@ -1355,7 +1720,7 @@ class MainWindow(QWidget):
 
     def start_process(self):
         target_acc = self.acc_input.text().strip()
-        recovery_acc = self.recovery_input.text().strip()
+        recovery_list = self.get_recovery_list()
 
         if not target_acc:
             self.log_output.append("⚠️ Vui lòng nhập tài khoản cần lấy OAuth2!")
@@ -1370,20 +1735,20 @@ class MainWindow(QWidget):
             self.log_output.append(f"⚠️ Không tìm thấy mật khẩu email ở phía sau email '{email}'!")
             return
 
-        if not recovery_acc or '|' not in recovery_acc:
-            self.log_output.append("⚠️ Vui lòng nhập email khôi phục dạng tk|mk|outh2|clientId!")
+        if not recovery_list:
+            self.log_output.append("⚠️ Vui lòng nhập hoặc thêm ít nhất một email khôi phục dạng tk|mk|outh2|clientId!")
             return
 
         self.btn_start.setEnabled(False)
         self.result_output.clear()
         
-        self.worker = AutomationWorker(target_acc, recovery_acc)
+        self.worker = AutomationWorker(target_acc, recovery_list)
         self.worker.log_signal.connect(self.update_log)
         self.worker.result_signal.connect(self.show_result)
         self.worker.finished_signal.connect(lambda: self.btn_start.setEnabled(True))
         self.worker.start()
         
-        self.log_output.append(f"🚀 Đã bấm PLAY -> Nhận diện Email: {email} | Trình duyệt đang khởi động...")
+        self.log_output.append(f"🚀 Đã bấm PLAY -> Nhận diện Email: {email} | Danh sách Khôi phục: {len(recovery_list)} mail | Trình duyệt đang khởi động...")
 
     def toggle_pause(self):
         if not self.worker or not self.worker.isRunning():
