@@ -11,11 +11,13 @@ import random
 import hashlib
 import shutil
 import importlib.util
+import ctypes
+import psutil
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QTextEdit, QLineEdit, QLabel, QSizePolicy, QMessageBox,
                              QComboBox, QDialog, QCheckBox, QSpinBox, QProgressBar, QTabWidget, QGroupBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QTextCursor
 
 from playwright.async_api import async_playwright   
@@ -94,7 +96,7 @@ def safe_print(msg):
             pass
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -1248,6 +1250,157 @@ class NicknamesDialog(QDialog):
         self.accept()
 
 # ========================================================
+# TỰ ĐỘNG DÒ API, KHỞI CHẠY GPM & GIẢI LICENSE
+# ========================================================
+def find_gpm_exe_path():
+    """Tìm đường dẫn tệp thực thi GPMLogin.exe trên máy"""
+    candidates = [
+        r"C:\Users\DungAnh\AppData\Local\Programs\GPMLogin\GPMLogin.exe",
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Programs\GPMLogin\GPMLogin.exe"),
+        r"D:\GPMLogin\GPMLogin.exe",
+        r"E:\GPMLogin\GPMLogin.exe",
+        r"C:\Program Files\GPMLogin\GPMLogin.exe",
+        r"C:\Program Files (x86)\GPMLogin\GPMLogin.exe"
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+def is_gpm_running():
+    """Kiểm tra GPMLogin.exe có đang chạy không"""
+    for p in psutil.process_iter(['name']):
+        if (p.info['name'] or '').lower() == 'gpmlogin.exe':
+            return True
+    return False
+
+def detect_gpm_api_url():
+    """Tự động quét cổng API của GPM (từ file api_port.dat hoặc các cổng thông dụng)"""
+    exe_path = find_gpm_exe_path()
+    ports_to_try = []
+
+    if exe_path:
+        gpm_dir = os.path.dirname(exe_path)
+        port_file = os.path.join(gpm_dir, "api_port.dat")
+        if os.path.isfile(port_file):
+            try:
+                with open(port_file, "r", encoding="utf-8", errors="ignore") as f:
+                    p = f.read().strip()
+                    if p.isdigit():
+                        ports_to_try.append(int(p))
+            except Exception:
+                pass
+
+    for p in [13600, 19955, 50615, 9996]:
+        if p not in ports_to_try:
+            ports_to_try.append(p)
+
+    for port in ports_to_try:
+        url = f"http://127.0.0.1:{port}"
+        try:
+            resp = requests.get(f"{url}/api/v3/profiles", timeout=1)
+            if resp.status_code == 200:
+                return f"{url}/api/v3"
+        except Exception:
+            pass
+        try:
+            resp = requests.get(f"{url}/v2/profiles", timeout=1)
+            if resp.status_code == 200:
+                return f"{url}/api/v3"
+        except Exception:
+            pass
+
+    return None
+
+def auto_detect_or_launch_gpm(log_func=None, update_api_callback=None):
+    """
+    Tự động quét API của GPM.
+    Nếu chưa có GPM thì tự khởi động GPM lên và tự giải License:
+    - Gửi phím Enter
+    - Kéo chuột xuống góc dưới cùng bên phải màn hình ấn Show Desktop
+    - Quét cổng API và cập nhật vào tool
+    """
+    def log(msg):
+        if log_func:
+            log_func(msg)
+        else:
+            safe_print(msg)
+
+    # 1. Nếu GPM đang chạy -> thử quét API ngay
+    if is_gpm_running():
+        log("🔍 GPMLogin đang chạy -> Đang tự động quét cổng API...")
+        api_url = detect_gpm_api_url()
+        if api_url:
+            log(f"✅ Đã tự động nhận diện GPM Local API: {api_url}")
+            if update_api_callback:
+                update_api_callback(api_url)
+            return api_url
+
+    # 2. Nếu GPM chưa chạy (hoặc đang chạy nhưng không phản hồi API)
+    log("🚀 Chưa có GPMLogin hoạt động -> Đang tự động bật GPMLogin...")
+    exe_path = find_gpm_exe_path()
+    if not exe_path:
+        log("❌ Không tìm thấy file GPMLogin.exe trên máy để khởi động tự động!")
+        return None
+
+    try:
+        subprocess.Popen([exe_path], cwd=os.path.dirname(exe_path))
+    except Exception as e:
+        log(f"❌ Lỗi khi khởi chạy GPMLogin: {e}")
+        return None
+
+    log("⏳ Đang chờ cửa sổ GPMLogin hiển thị (khoảng 3.5 giây)...")
+    time.sleep(3.5)
+
+    # Giải License: Ấn Enter
+    log("🔑 Đang giải mã License: Tự động gửi phím Enter...")
+    try:
+        user32 = ctypes.windll.user32
+        user32.keybd_event(0x0D, 0, 0, 0)
+        time.sleep(0.08)
+        user32.keybd_event(0x0D, 0, 2, 0)
+    except Exception as e:
+        log(f"⚠️ Lỗi gửi phím Enter: {e}")
+
+    time.sleep(1.0)
+
+    # Giải License: Dùng chuột kéo xuống góc dưới bên phải ấn Show Desktop
+    log("🖱️ Đang di chuyển chuột xuống góc dưới phải màn hình để nhấn Show Desktop...")
+    try:
+        user32 = ctypes.windll.user32
+        w = user32.GetSystemMetrics(0)
+        h = user32.GetSystemMetrics(1)
+        target_x = max(0, w - 2)
+        target_y = max(0, h - 2)
+        user32.SetCursorPos(target_x, target_y)
+        time.sleep(0.2)
+        user32.mouse_event(0x0002, 0, 0, 0, 0)
+        time.sleep(0.08)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
+        time.sleep(0.4)
+    except Exception as e:
+        log(f"⚠️ Lỗi click Show Desktop: {e}")
+
+    time.sleep(1.0)
+    log("🔍 Đang quét cổng API của GPMLogin vừa khởi động...")
+    
+    api_url = None
+    for sec in range(15):
+        api_url = detect_gpm_api_url()
+        if api_url:
+            break
+        time.sleep(1.0)
+
+    if api_url:
+        log(f"🎉 GPMLogin đã khởi động, vượt License và kết nối API thành công: {api_url}")
+        if update_api_callback:
+            update_api_callback(api_url)
+        return api_url
+    else:
+        log("⚠️ Đã mở GPMLogin nhưng chưa phát hiện cổng API phản hồi. Bạn có thể bấm '🔍 Quét API' để thử lại.")
+        return None
+
+# ========================================================
 # TỰ ĐỘNG TẠO PROFILE GPM (LOCAL API V2/V3)
 # ========================================================
 def get_gpm_base_url(api_url):
@@ -1775,6 +1928,7 @@ class GpmBulkCreatorDialog(QDialog):
 class MainWindow(QWidget):
     background_log_signal = pyqtSignal(str)
     vpn_gpm_finished_signal = pyqtSignal()
+    gpm_api_detected_signal = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -1782,7 +1936,24 @@ class MainWindow(QWidget):
         self.vpn_gpm_running = False
         self.background_log_signal.connect(self.update_log)
         self.vpn_gpm_finished_signal.connect(self.on_vpn_gpm_finished)
+        self.gpm_api_detected_signal.connect(self.on_gpm_api_detected)
         self.initUI()
+
+        # Tự động quét API / khởi động GPM & giải License sau 1.2s khi mở app
+        QTimer.singleShot(1200, self.trigger_scan_or_launch_gpm)
+
+    def on_gpm_api_detected(self, api_url):
+        if api_url:
+            self.gpm_api_input.setText(api_url)
+
+    def trigger_scan_or_launch_gpm(self):
+        import threading
+        def run():
+            auto_detect_or_launch_gpm(
+                log_func=self.background_log_signal.emit,
+                update_api_callback=self.gpm_api_detected_signal.emit
+            )
+        threading.Thread(target=run, daemon=True).start()
 
     def initUI(self):
         self.setWindowTitle(f'Get OAuth2 Token & Outlook Loader - Hao Automation (v{APP_VERSION})')
@@ -1866,8 +2037,15 @@ class MainWindow(QWidget):
         self.gpm_api_input.setPlaceholderText("Ví dụ: http://127.0.0.1:13600/api/v3")
         self.gpm_api_input.setText("http://127.0.0.1:13600/api/v3")
         self.gpm_api_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 8px; border-radius: 4px; color: #80cbc4;")
+        
+        self.btn_scan_gpm_api = QPushButton("🔍 Quét API / Mở GPM")
+        self.btn_scan_gpm_api.setStyleSheet("padding: 8px 12px; background-color: #00695c; color: white; border-radius: 4px; font-weight: bold;")
+        self.btn_scan_gpm_api.setToolTip("Tự động quét cổng API hoặc mở GPMLogin & vượt License nếu chưa chạy!")
+        self.btn_scan_gpm_api.clicked.connect(self.trigger_scan_or_launch_gpm)
+
         gpm_api_layout.addWidget(QLabel("<b>GPM Local API:</b>"))
-        gpm_api_layout.addWidget(self.gpm_api_input)
+        gpm_api_layout.addWidget(self.gpm_api_input, stretch=1)
+        gpm_api_layout.addWidget(self.btn_scan_gpm_api)
         main_layout.addLayout(gpm_api_layout)
 
         # Cấu hình TikTok Profile (Đổi avatar & tên nick)
@@ -2126,6 +2304,13 @@ class MainWindow(QWidget):
 
     def open_gpm_profile_and_tiktok(self, profile_name, api_url):
         """Tìm profile theo đúng tên, mở bằng GPM API v3 rồi mở TikTok qua CDP."""
+        if not is_gpm_running():
+            self.background_log_signal.emit("🚀 Phát hiện GPMLogin chưa mở -> Đang tự động mở và giải License...")
+            new_api = auto_detect_or_launch_gpm(log_func=self.background_log_signal.emit)
+            if new_api:
+                api_url = new_api
+                self.gpm_api_detected_signal.emit(new_api)
+
         api_url = api_url.rstrip('/')
         try:
             self.background_log_signal.emit(f"🧭 [Bước 3] Đang tìm profile GPM: {profile_name}")
