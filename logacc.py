@@ -2410,16 +2410,67 @@ class MainWindow(QWidget):
                             try:
                                 file_input.first.set_input_files(abs_avatar, timeout=7000)
                                 self.background_log_signal.emit("✅ [TikTok] Đã chọn file ảnh thành công! Đang chờ popup cắt ảnh...")
-                                target_page.wait_for_timeout(2000)
+                                target_page.wait_for_timeout(2500)
 
-                                # Nếu có popup cắt ảnh (Crop/Apply)
-                                apply_btn = target_page.locator('button:has-text("Apply"), button:has-text("Áp dụng"), button:has-text("Xác nhận"), button:has-text("Save")')
-                                if apply_btn.count() > 0:
-                                    self.background_log_signal.emit("👆 [TikTok] Bấm nút Apply (Cắt ảnh)...")
-                                    apply_btn.first.click(timeout=5000)
-                                    target_page.wait_for_timeout(1500)
+                                # Tìm và bấm nút Apply của modal cắt ảnh
+                                # Lưu ý: Tuyệt đối KHÔNG gộp "Save" vào đây vì Save là nút của form Edit Profile (đang bị disable).
+                                self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh)...")
+                                clicked_apply = False
+
+                                # 1. Bấm qua JS để định vị chính xác button Apply trong vùng crop
+                                try:
+                                    res_js = target_page.evaluate('''() => {
+                                        // Ưu tiên tìm trong container chứa react-transform-component
+                                        const cropEl = document.querySelector('.react-transform-component') || document.querySelector('[class*="transform-component"]');
+                                        if (cropEl) {
+                                            const modal = cropEl.closest('[role="dialog"]') || cropEl.closest('div[class*="modal"]') || cropEl.parentElement.parentElement;
+                                            if (modal) {
+                                                const btns = Array.from(modal.querySelectorAll('button'));
+                                                for (const b of btns) {
+                                                    const t = (b.innerText || '').trim().toLowerCase();
+                                                    if (t === 'apply' || t === 'áp dụng' || t.includes('apply') || t.includes('áp dụng')) {
+                                                        b.click();
+                                                        return 'crop_modal_apply_text';
+                                                    }
+                                                }
+                                                // Nếu không thấy chữ, nút Apply thường là nút cuối cùng trong modal crop
+                                                if (btns.length >= 2) {
+                                                    btns[btns.length - 1].click();
+                                                    return 'crop_modal_last_btn';
+                                                }
+                                            }
+                                        }
+                                        // Tìm trên toàn trang các nút có text Apply hoặc Áp dụng
+                                        const allBtns = Array.from(document.querySelectorAll('button'));
+                                        for (const b of allBtns) {
+                                            const t = (b.innerText || '').trim().toLowerCase();
+                                            if (t === 'apply' || t === 'áp dụng') {
+                                                b.click();
+                                                return 'doc_apply_text';
+                                            }
+                                        }
+                                        return null;
+                                    }''')
+                                    if res_js:
+                                        clicked_apply = True
+                                        self.background_log_signal.emit(f"✅ [TikTok] Đã bấm nút Apply cắt ảnh ({res_js}).")
+                                except Exception as e_crop_js:
+                                    self.background_log_signal.emit(f"ℹ️ [TikTok] JS Apply: {e_crop_js}")
+
+                                # 2. Nếu JS chưa bấm được, fallback qua Playwright locator
+                                if not clicked_apply:
+                                    apply_btn = target_page.locator('button:has-text("Apply"), button:has-text("Áp dụng")')
+                                    if apply_btn.count() > 0:
+                                        apply_btn.first.click(force=True, timeout=5000)
+                                        clicked_apply = True
+                                        self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh (Playwright).")
+                                    else:
+                                        self.background_log_signal.emit("ℹ️ [TikTok] Không thấy popup cắt ảnh hoặc ảnh đã tự động được nạp.")
+
+                                # Chờ popup cắt ảnh đóng lại hoàn toàn để không che khuất các ô bên dưới
+                                target_page.wait_for_timeout(2500)
                             except Exception as err:
-                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload avatar: {err}")
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload/cắt avatar: {err}")
                         else:
                             self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô input[type='file'] để nạp avatar.")
 
@@ -2429,8 +2480,28 @@ class MainWindow(QWidget):
                         nick_input = target_page.locator('input[placeholder="Name"], input[placeholder="Tên"], input[name="nickname"], div[data-e2e="edit-profile-name-input"] input')
                         if nick_input.count() > 0:
                             try:
-                                nick_input.first.click(timeout=3000)
+                                # Dùng force=True khi click để tránh bị overlay chặn tương tác pointer
+                                try:
+                                    nick_input.first.click(force=True, timeout=2000)
+                                except Exception:
+                                    pass
+
+                                # Điền tên nick
                                 nick_input.first.fill(chosen_nick, timeout=5000)
+
+                                # Đảm bảo React state cập nhật đúng qua JS event
+                                try:
+                                    target_page.evaluate(f'''() => {{
+                                        const inp = document.querySelector('input[placeholder="Name"], input[placeholder="Tên"], input[name="nickname"], div[data-e2e="edit-profile-name-input"] input');
+                                        if (inp) {{
+                                            inp.value = {json.dumps(chosen_nick)};
+                                            inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                            inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                        }}
+                                    }}''')
+                                except Exception:
+                                    pass
+
                                 self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick: '{chosen_nick}'.")
                                 target_page.wait_for_timeout(1000)
                             except Exception as err:
@@ -2439,20 +2510,36 @@ class MainWindow(QWidget):
                             self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick.")
 
                     # 6. BƯỚC 5: BẤM NÚT LƯU (SAVE)
-                    self.background_log_signal.emit("💾 [Bước 5: Lưu hồ sơ] Đang tìm nút Lưu (Save)...")
+                    self.background_log_signal.emit("💾 [Bước 5: Lưu hồ sơ] Đang chờ nút Save sẵn sàng...")
                     save_btn = target_page.locator('button[data-e2e="edit-profile-save"], button:has-text("Save"), button:has-text("Lưu")')
                     if save_btn.count() > 0:
                         try:
-                            save_btn.first.click(timeout=5000)
-                            self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Save lưu thay đổi!")
-                            target_page.wait_for_timeout(2000)
+                            # Đợi nút Save được kích hoạt (enabled) - tối đa 8 giây
+                            save_ready = False
+                            for _ in range(8):
+                                try:
+                                    if not save_btn.first.is_disabled():
+                                        save_ready = True
+                                        break
+                                except Exception:
+                                    pass
+                                target_page.wait_for_timeout(1000)
+
+                            if save_ready:
+                                save_btn.first.click(timeout=5000)
+                                self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Save lưu thay đổi!")
+                            else:
+                                self.background_log_signal.emit("⚠️ [TikTok] Nút Save vẫn đang disabled, click cưỡng bức (force=True)...")
+                                save_btn.first.click(force=True, timeout=4000)
+
+                            target_page.wait_for_timeout(2500)
 
                             # Nếu có modal xác nhận (Confirm tên chỉ được đổi 7 ngày 1 lần)
                             confirm_modal = target_page.locator('button:has-text("Confirm"), button:has-text("Xác nhận")')
                             if confirm_modal.count() > 0:
                                 self.background_log_signal.emit("👆 [TikTok] Xác nhận modal đổi tên...")
                                 confirm_modal.first.click(timeout=4000)
-                                target_page.wait_for_timeout(1500)
+                                target_page.wait_for_timeout(2000)
 
                             self.background_log_signal.emit("🎉 [TikTok] QUY TRÌNH ĐỔI TÊN & AVATAR ĐÃ HOÀN TẤT THÀNH CÔNG!")
                         except Exception as err:
