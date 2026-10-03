@@ -2624,10 +2624,10 @@ class MainWindow(QWidget):
                     # Hàm hỗ trợ bấm nút Save và xử lý confirm modal
                     def click_save_dialog(save_action_name="Lưu"):
                         self.background_log_signal.emit(f"💾 [TikTok] Đang chờ nút Save sẵn sàng ({save_action_name})...")
-                        save_btn = target_page.locator('button[data-e2e="edit-profile-save"], button.e1lwtbhx5, button:has-text("Save"), button:has-text("Lưu")')
+                        save_btn = target_page.locator('div[data-e2e="edit-profile-popup"] button[data-e2e="edit-profile-save"], button[data-e2e="edit-profile-save"], div[aria-label="Edit profile"] button[data-e2e="edit-profile-save"]')
                         if save_btn.count() > 0:
                             save_ready = False
-                            for _ in range(8):
+                            for _ in range(10):
                                 try:
                                     if not save_btn.first.is_disabled():
                                         save_ready = True
@@ -2637,20 +2637,20 @@ class MainWindow(QWidget):
                                 target_page.wait_for_timeout(1000)
 
                             if save_ready:
-                                save_btn.first.click(force=True, timeout=5000)
+                                save_btn.first.click(timeout=5000)
                                 self.background_log_signal.emit(f"✅ [TikTok] Đã bấm nút Save ({save_action_name}) thành công!")
                             else:
-                                self.background_log_signal.emit(f"⚠️ [TikTok] Nút Save ({save_action_name}) vẫn đang disabled, click cưỡng bức (force=True)...")
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Nút Save ({save_action_name}) chưa enable, click force...")
                                 save_btn.first.click(force=True, timeout=4000)
 
                             target_page.wait_for_timeout(2000)
 
                             # Chờ và bấm modal xác nhận nếu có (Confirm)
-                            confirm_modal = target_page.locator('div[role="dialog"] button:has-text("Confirm"), div[role="dialog"] button:has-text("Xác nhận"), div[role="dialog"] button.TUXButton--primary, div[role="dialog"] button:has-text("Change"), div[role="dialog"] button:has-text("Đổi"), button:has-text("Confirm"), button:has-text("Xác nhận")')
+                            confirm_modal = target_page.locator('div[role="dialog"]:not([data-e2e="edit-profile-popup"]) button:has-text("Confirm"), div[role="dialog"]:not([data-e2e="edit-profile-popup"]) button:has-text("Xác nhận"), div[role="dialog"] button.TUXButton--primary, div[role="dialog"] button:has-text("Change"), div[role="dialog"] button:has-text("Confirm"), button:has-text("Confirm")')
                             for _ in range(5):
                                 if confirm_modal.count() > 0:
                                     try:
-                                        self.background_log_signal.emit("👆 [TikTok] Đã phát hiện modal xác nhận. Đang bấm Confirm...")
+                                        self.background_log_signal.emit("👆 [TikTok] Đã phát hiện modal xác nhận (Confirm). Đang bấm...")
                                         confirm_modal.first.click(force=True, timeout=3000)
                                         break
                                     except Exception:
@@ -2661,6 +2661,7 @@ class MainWindow(QWidget):
                                 target_page.evaluate('''() => {
                                     const dialogs = document.querySelectorAll('div[role="dialog"]');
                                     for (const d of dialogs) {
+                                        if (d.getAttribute('data-e2e') === 'edit-profile-popup') continue;
                                         const btns = d.querySelectorAll('button');
                                         for (const b of btns) {
                                             const txt = (b.innerText || '').trim().toLowerCase();
@@ -2676,12 +2677,12 @@ class MainWindow(QWidget):
                                 pass
 
                             self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi TikTok lưu dữ liệu ({save_action_name}) lên máy chủ...")
-                            target_page.wait_for_timeout(4000)
+                            target_page.wait_for_timeout(3500)
                             try:
-                                target_page.locator('div[role="dialog"]').wait_for(state="detached", timeout=5000)
+                                target_page.locator('div[data-e2e="edit-profile-popup"]').wait_for(state="detached", timeout=6000)
                             except Exception:
                                 pass
-                            target_page.wait_for_timeout(1500)
+                            target_page.wait_for_timeout(2000)
                             return True
                         else:
                             self.background_log_signal.emit(f"⚠️ [TikTok] Không tìm thấy nút Save để {save_action_name}.")
@@ -2698,19 +2699,9 @@ class MainWindow(QWidget):
                         abs_avatar = os.path.abspath(chosen_avatar)
                         self.background_log_signal.emit(f"🖼️ [Phần 1: Thay Avatar] Bắt đầu tải ảnh đại diện: '{os.path.basename(abs_avatar)}'...")
                         
-                        # Ghi nhận URL avatar hiện tại trước khi đổi để so sánh
-                        old_avatar_src = ""
-                        try:
-                            old_avatar_src = target_page.evaluate('''() => {
-                                const img = document.querySelector('[data-e2e="user-avatar"] img, div[class*="AvatarContainer"] img, span[class*="SpanAvatar"] img, img[class*="ImgAvatar"]');
-                                return img ? (img.currentSrc || img.src || '') : '';
-                            }''')
-                        except Exception:
-                            pass
-
                         open_edit_dialog("thay đổi Avatar")
                         
-                        file_input = target_page.locator('input[type="file"]')
+                        file_input = target_page.locator('div[data-e2e="edit-profile-popup"] input[type="file"], input[type="file"]')
                         if file_input.count() > 0:
                             try:
                                 file_input.first.set_input_files(abs_avatar, timeout=7000)
@@ -2719,13 +2710,13 @@ class MainWindow(QWidget):
 
                                 # Tìm và bấm nút Apply của modal cắt ảnh
                                 self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh)...")
-                                apply_btn = target_page.locator('div[role="dialog"] button:has-text("Apply"), div[role="dialog"] button:has-text("Áp dụng"), button:has-text("Apply"), button:has-text("Áp dụng")')
+                                apply_btn = target_page.locator('button:has-text("Apply"), button:has-text("Áp dụng")')
                                 
                                 clicked_apply = False
                                 for _ in range(5):
                                     if apply_btn.count() > 0:
                                         try:
-                                            apply_btn.first.click(force=True, timeout=3000)
+                                            apply_btn.last.click(force=True, timeout=3000)
                                             clicked_apply = True
                                             self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh.")
                                             break
@@ -2750,78 +2741,59 @@ class MainWindow(QWidget):
                                     target_page.locator('.react-transform-component').wait_for(state="detached", timeout=6000)
                                 except Exception:
                                     pass
-                                target_page.wait_for_timeout(2000)
+                                target_page.wait_for_timeout(2500)
 
                                 # BẤM LƯU RIÊNG AVATAR!
                                 self.background_log_signal.emit("💾 [TikTok] Đang lưu riêng Avatar...")
                                 if click_save_dialog("Avatar"):
                                     self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất gửi lệnh lưu Avatar!")
                                     
-                                    # KIỂM TRA RIÊNG AVATAR (CHECK AVATAR: Kiểm tra khác avatar mặc định)
+                                    # KIỂM TRA RIÊNG AVATAR (CHECK AVATAR: Chỉ xác nhận khi đã KHÁC avatar mặc định)
                                     self.background_log_signal.emit("🔍 [TikTok] [Kiểm tra Avatar] Đang kiểm tra xem ảnh đại diện đã KHÁC avatar mặc định chưa...")
                                     for check_av in range(1, 4):
-                                        target_page.wait_for_timeout(2000)
+                                        self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_av}/3) Đang F5 (Reload) lại trang để kiểm tra Avatar...")
+                                        try:
+                                            target_page.reload(wait_until="domcontentloaded", timeout=25000)
+                                            target_page.wait_for_timeout(3500)
+                                        except Exception as reload_err:
+                                            self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
+
                                         is_not_default = False
-                                        current_avatar_src = ""
                                         try:
                                             is_not_default = target_page.evaluate('''() => {
-                                                const container = document.querySelector('[data-e2e="user-avatar"], div[class*="AvatarContainer"], span[class*="SpanAvatar"]');
-                                                if (!container) {
-                                                    const anyAvt = document.querySelector('img[class*="Avatar"], img[class*="avatar"]');
-                                                    if (anyAvt) {
-                                                        const s = (anyAvt.currentSrc || anyAvt.src || '').toLowerCase();
-                                                        return !s.includes('default') && (s.includes('tiktokcdn') || s.includes('avt') || s.includes('http'));
-                                                    }
-                                                    return false;
-                                                }
+                                                const container = document.querySelector('span[class*="SpanAvatarContainer"], [data-e2e="user-avatar"], div[class*="AvatarContainer"]');
+                                                if (!container) return false;
 
-                                                // 1. Nếu container chỉ chứa icon SVG bóng người mặc định mà không có thẻ img
-                                                const hasSvgOnly = container.querySelector('svg') && !container.querySelector('img');
-                                                if (hasSvgOnly) return false;
+                                                // 1. Nếu chỉ chứa SVG icon bóng người rỗng
+                                                if (container.querySelector('svg') && !container.querySelector('img')) return false;
 
-                                                // 2. Tìm thẻ img
-                                                const img = container.querySelector('img') || document.querySelector('img[class*="ImgAvatar"]');
+                                                const img = container.querySelector('img');
                                                 if (!img) return false;
 
                                                 const src = (img.currentSrc || img.src || '').toLowerCase();
                                                 if (!src || src.startsWith('data:image/svg')) return false;
 
-                                                // 3. Loại trừ các từ khóa ảnh placeholder mặc định
-                                                const defaultKeywords = ['default-avatar', 'avatar-default', 'musically-default', 'default_avatar', 'headshot', 'placeholder'];
+                                                // 2. Các định danh avatar mặc định của TikTok
+                                                const defaultKeywords = ['musically-maliva-obj', '1594805258216454', 'default-avatar', 'avatar-default', 'musically-default', 'default_avatar', 'headshot', 'placeholder', 'empty'];
                                                 for (const kw of defaultKeywords) {
                                                     if (src.includes(kw)) return false;
                                                 }
 
-                                                // 4. Nếu có link ảnh thực tế trên CDN hoặc link http hợp lệ
-                                                return src.includes('tiktokcdn') || src.includes('avt') || src.includes('image') || src.startsWith('http');
+                                                // 3. Phải là ảnh avatar cá nhân tùy chỉnh trên CDN (chứa avt hoặc tos-)
+                                                return src.includes('avt') || src.includes('tos-');
                                             }''')
                                         except Exception:
                                             pass
 
-                                        try:
-                                            current_avatar_src = target_page.evaluate('''() => {
-                                                const img = document.querySelector('[data-e2e="user-avatar"] img, div[class*="AvatarContainer"] img, span[class*="SpanAvatar"] img, img[class*="ImgAvatar"]');
-                                                return img ? (img.currentSrc || img.src || '') : '';
-                                            }''')
-                                        except Exception:
-                                            pass
-
-                                        # Điều kiện thành công: Đã là ảnh cá nhân (khác mặc định) HOẶC src đã thay đổi so với src ban đầu
-                                        if is_not_default or (current_avatar_src and old_avatar_src and current_avatar_src != old_avatar_src):
+                                        if is_not_default:
                                             avatar_success = True
-                                            self.background_log_signal.emit("✅ [TikTok] [Kiểm tra Avatar] Đã xác nhận: Ảnh đại diện đã được cập nhật (đã khác avatar mặc định)!")
+                                            self.background_log_signal.emit("✅ [TikTok] [Kiểm tra Avatar] Đã xác nhận: Ảnh đại diện đã được cập nhật thành công (đã khác avatar mặc định)!")
                                             break
                                         else:
-                                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_av}/3) Avatar chưa đổi (vẫn là mặc định), đang F5 (Reload) lại trang...")
-                                            try:
-                                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
-                                                target_page.wait_for_timeout(3500)
-                                            except Exception as reload_err:
-                                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
+                                            self.background_log_signal.emit(f"⚠️ [TikTok] (Lần {check_av}/3) Ảnh vẫn là avatar mặc định của hệ thống.")
 
                                     if not avatar_success:
-                                        self.background_log_signal.emit("⚠️ [TikTok] [Kiểm tra Avatar] Đã F5 3 lần nhưng chưa thấy ảnh mới, TikTok có thể đang duyệt ảnh hoặc cache CDN.")
-                                        avatar_success = True
+                                        self.background_log_signal.emit("❌ [TikTok] [Kiểm tra Avatar] Sau 3 lần F5, avatar vẫn chưa cập nhật được.")
                                 else:
                                     self.background_log_signal.emit("⚠️ [TikTok] Không thể bấm lưu Avatar.")
 
@@ -2840,14 +2812,14 @@ class MainWindow(QWidget):
                         
                         open_edit_dialog("thay đổi Tên Nick")
                         
-                        # Tự động phát hiện và định vị chính xác ô Name bằng CẤU TRÚC HTML THUẦN TÚY (Độc lập với mọi ngôn ngữ: Anh, Việt, Ả Rập, Tây Ban Nha...)
+                        # Tự động phát hiện và định vị chính xác ô Name bằng CẤU TRÚC HTML THUẦN TÚY
                         found_name_input = False
                         try:
                             found_name_input = target_page.evaluate('''() => {
-                                const dialog = document.querySelector('div[role="dialog"]') || document.body;
+                                const dialog = document.querySelector('div[data-e2e="edit-profile-popup"], div[aria-label="Edit profile"]') || document.body;
                                 
-                                // 1. Dò theo thuộc tính chuẩn data-e2e của TikTok (không bị đổi theo ngôn ngữ)
-                                let inp = dialog.querySelector('[data-e2e="edit-profile-name-input"] input, input[data-e2e="edit-profile-name-input"], [data-e2e*="name-input"] input');
+                                // 1. Dò theo thuộc tính chuẩn placeholder="Name" hoặc data-e2e của TikTok
+                                let inp = dialog.querySelector('input[placeholder="Name"], [data-e2e="edit-profile-name-input"] input, input[data-e2e="edit-profile-name-input"]');
                                 
                                 // 2. Dò theo cấu trúc cây DOM trong dialog (loại trừ file, hidden, search)
                                 if (!inp) {
@@ -2861,15 +2833,14 @@ class MainWindow(QWidget):
                                             const txt = row ? row.innerText : '';
                                             return !txt.includes('@') && !txt.includes('tiktok.com');
                                         });
-                                        // Hoặc tìm ô có hiển thị đếm số ký tự /30 hoặc maxlength=30 (Name tối đa 30 ký tự trên TikTok)
+                                        // Hoặc tìm ô có placeholder Name hoặc /30
                                         if (!inp) {
                                             inp = textInputs.find(i => {
-                                                const row = i.closest('div[class*="DivItem"], div[class*="ItemContainer"]') || i.parentElement;
-                                                const txt = row ? row.innerText : '';
-                                                return txt.includes('/30') || txt.includes('/ 30') || i.getAttribute('maxlength') === '30';
+                                                const ph = (i.getAttribute('placeholder') || '').toLowerCase();
+                                                return ph === 'name' || ph === 'tên';
                                             });
                                         }
-                                        // Fallback vị trí DOM: Trong popup TikTok, ô Name luôn xếp dưới ô Username
+                                        // Fallback vị trí DOM: Trong popup TikTok, ô Name luôn là ô input text cuối cùng
                                         if (!inp) {
                                             inp = textInputs[textInputs.length - 1];
                                         }
@@ -2893,8 +2864,7 @@ class MainWindow(QWidget):
                                 nick_elem = target_locator.first
 
                         if not nick_elem:
-                            # Dự phòng thêm các selector theo cấu trúc HTML chuẩn
-                            fallback_locator = target_page.locator('div[role="dialog"] [data-e2e="edit-profile-name-input"] input, div[role="dialog"] input[class*="InputText"]:not([type="file"])')
+                            fallback_locator = target_page.locator('div[data-e2e="edit-profile-popup"] input[placeholder="Name"], div[data-e2e="edit-profile-popup"] input:not([type="file"])')
                             if fallback_locator.count() > 0:
                                 nick_elem = fallback_locator.last
 
@@ -2911,7 +2881,7 @@ class MainWindow(QWidget):
 
                                 # Đồng bộ giá trị vào React native state và dọn dẹp attribute tạm
                                 target_page.evaluate('''(val) => {
-                                    const inp = document.querySelector('input[data-target-nick-input="true"]') || document.querySelector('div[role="dialog"] [data-e2e="edit-profile-name-input"] input');
+                                    const inp = document.querySelector('input[data-target-nick-input="true"]') || document.querySelector('div[data-e2e="edit-profile-popup"] input[placeholder="Name"]');
                                     if (inp) {
                                         inp.focus();
                                         const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
