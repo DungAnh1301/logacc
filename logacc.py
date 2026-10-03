@@ -2686,22 +2686,63 @@ class MainWindow(QWidget):
                         # 5. BƯỚC 4: THAY ĐỔI TÊN NICK (NẾU CÓ)
                         if chosen_nick:
                             self.background_log_signal.emit(f"📝 [Bước 4: Thay Tên Nick] Đang điền tên: '{chosen_nick}'...")
-                            nick_input = target_page.locator('input[placeholder="Name"], input[placeholder="Tên"], input.e1lwtbhx14, input[name="nickname"], div[data-e2e="edit-profile-name-input"] input')
+                            
+                            # Tự động khắc phục nếu ô Username từng bị dính ký tự lỗi/khoảng trắng từ trước
+                            try:
+                                target_page.evaluate('''() => {
+                                    const inputs = Array.from(document.querySelectorAll('input:not([type="file"])'));
+                                    const userInp = inputs.find(i => {
+                                        const ph = (i.getAttribute('placeholder') || '').trim().toLowerCase();
+                                        return ph.includes('user') || ph.includes('người dùng');
+                                    });
+                                    if (userInp && userInp.value && userInp.value.includes(' ')) {
+                                        const cleanVal = userInp.value.replace(/\\s+/g, '');
+                                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                                        if (setter) setter.call(userInp, cleanVal);
+                                        else userInp.value = cleanVal;
+                                        userInp.dispatchEvent(new Event('input', { bubbles: true }));
+                                        userInp.dispatchEvent(new Event('change', { bubbles: true }));
+                                    }
+                                }''')
+                            except Exception:
+                                pass
+
+                            # CHỈ tìm chính xác ô Name (Tên hiển thị), tuyệt đối KHÔNG chọn ô Username (Tên người dùng)
+                            nick_input = target_page.locator('input[placeholder="Name"], input[placeholder="Tên"], div[data-e2e="edit-profile-name-input"] input')
+                            if nick_input.count() == 0:
+                                nick_input = target_page.locator('div[role="dialog"] input:not([type="file"]):not([placeholder*="User"]):not([placeholder*="user"]):not([placeholder*="người dùng"])')
+
                             if nick_input.count() > 0:
                                 try:
                                     nick_elem = nick_input.first
+                                    # Chờ popup cắt ảnh biến mất hoàn toàn
+                                    try:
+                                        target_page.locator('.react-transform-component').wait_for(state="detached", timeout=3000)
+                                    except Exception:
+                                        pass
+
                                     nick_elem.click(force=True, timeout=3000)
                                     target_page.wait_for_timeout(300)
 
-                                    # Xóa và gõ tên mới
+                                    # Xóa và gõ tên mới vào đúng ô Name
                                     nick_elem.fill("")
                                     target_page.wait_for_timeout(200)
                                     nick_elem.fill(chosen_nick)
                                     target_page.wait_for_timeout(300)
 
-                                    # Kích hoạt sự kiện React native để chắc chắn Save button được enabled
+                                    # Kích hoạt sự kiện React native chính xác trên ô Name (loại trừ Username)
                                     target_page.evaluate('''(val) => {
-                                        const inp = document.querySelector('input[placeholder="Name"], input[name="nickname"], input.e1lwtbhx14');
+                                        const inputs = Array.from(document.querySelectorAll('input:not([type="file"])'));
+                                        let inp = inputs.find(i => {
+                                            const ph = (i.getAttribute('placeholder') || '').trim().toLowerCase();
+                                            return ph === 'name' || ph === 'tên' || ph === 'nickname';
+                                        });
+                                        if (!inp) {
+                                            inp = inputs.find(i => {
+                                                const ph = (i.getAttribute('placeholder') || '').trim().toLowerCase();
+                                                return !ph.includes('user') && !ph.includes('người dùng');
+                                            });
+                                        }
                                         if (inp) {
                                             inp.focus();
                                             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -2716,11 +2757,11 @@ class MainWindow(QWidget):
                                     }''', chosen_nick)
                                     target_page.wait_for_timeout(500)
 
-                                    self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick: '{chosen_nick}'.")
+                                    self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick vào ô Name: '{chosen_nick}'.")
                                 except Exception as err:
                                     self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi điền tên: {err}")
                             else:
-                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick.")
+                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick (Name).")
 
                         # 6. BƯỚC 5: BẤM NÚT LƯU (SAVE)
                         self.background_log_signal.emit("💾 [Bước 5: Lưu hồ sơ] Đang chờ nút Save sẵn sàng...")
