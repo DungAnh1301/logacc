@@ -2291,7 +2291,7 @@ class MainWindow(QWidget):
                 
         return result_list
 
-    def run_tiktok_profile_update(self, remote_address, chosen_nick, chosen_avatar):
+    def run_tiktok_profile_update(self, remote_address, chosen_nick, chosen_avatar, profile_id=None, api_url=None):
         """Tự động hoàn toàn từ Trang chủ -> Vào Profile -> Bấm Edit profile -> Thay Avatar & Tên Nick -> Bấm Lưu qua CDP."""
         if not chosen_nick and not chosen_avatar:
             return
@@ -2576,6 +2576,22 @@ class MainWindow(QWidget):
                                 self.background_log_signal.emit(f"⚠️ [TikTok] Lưu ý: Đã F5 3 lần nhưng chưa thấy tên '{chosen_nick}' xuất hiện trên giao diện. TikTok có thể đang kiểm duyệt hoặc máy chủ đồng bộ chậm.")
 
                             self.background_log_signal.emit("🎉 [TikTok] QUY TRÌNH ĐỔI TÊN & AVATAR ĐÃ HOÀN TẤT THÀNH CÔNG!")
+
+                            # Tự động đóng/kill Chrome ngay sau khi hoàn tất thành công
+                            self.background_log_signal.emit("🛑 [TikTok] Đang đóng trình duyệt Chrome...")
+                            try:
+                                browser.close()
+                                self.background_log_signal.emit("🛑 [TikTok] Đã đóng Chrome thành công!")
+                            except Exception as close_err:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi đóng Chrome: {close_err}")
+
+                            if profile_id and api_url:
+                                try:
+                                    base_api = api_url.rstrip('/')
+                                    requests.get(f"{base_api}/profiles/close/{profile_id}", timeout=5)
+                                    requests.get(f"{base_api}/api/v3/profiles/close/{profile_id}", timeout=5)
+                                except Exception:
+                                    pass
                         except Exception as err:
                             self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi bấm Lưu: {err}")
                     else:
@@ -2707,7 +2723,7 @@ class MainWindow(QWidget):
                     else:
                         self.background_log_signal.emit("ℹ️ [TikTok] Thư mục avatars/ trống, bỏ qua đổi avatar.")
 
-                self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar)
+                self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar, profile_id=target.get('id'), api_url=api_url)
         except Exception as e:
             self.background_log_signal.emit(f"❌ [GPM] {str(e)}")
 
@@ -2815,7 +2831,7 @@ class MainWindow(QWidget):
                     if not remote_address.startswith(("http://", "https://")):
                         remote_address = f"http://{remote_address}"
 
-                    self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar)
+                    self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar, profile_id=target.get('id'), api_url=api)
                 except Exception as ex:
                     self.background_log_signal.emit(f"❌ [Đổi Tên+Avatar] Lỗi: {str(ex)}")
 
