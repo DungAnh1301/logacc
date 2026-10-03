@@ -1979,6 +1979,7 @@ class MainWindow(QWidget):
     background_log_signal = pyqtSignal(str)
     vpn_gpm_finished_signal = pyqtSignal()
     gpm_api_detected_signal = pyqtSignal(str)
+    otp_received_signal = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -1987,6 +1988,7 @@ class MainWindow(QWidget):
         self.background_log_signal.connect(self.update_log)
         self.vpn_gpm_finished_signal.connect(self.on_vpn_gpm_finished)
         self.gpm_api_detected_signal.connect(self.on_gpm_api_detected)
+        self.otp_received_signal.connect(self.on_otp_received)
         self.initUI()
 
         # Tự động quét API / khởi động GPM & giải License sau 1.2s khi mở app
@@ -2415,60 +2417,34 @@ class MainWindow(QWidget):
                                 # Tìm và bấm nút Apply của modal cắt ảnh
                                 # Lưu ý: Tuyệt đối KHÔNG gộp "Save" vào đây vì Save là nút của form Edit Profile (đang bị disable).
                                 self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh)...")
+                                apply_btn = target_page.locator('div[role="dialog"] button:has-text("Apply"), div[role="dialog"] button:has-text("Áp dụng"), button:has-text("Apply"), button:has-text("Áp dụng")')
+                                
                                 clicked_apply = False
-
-                                # 1. Bấm qua JS để định vị chính xác button Apply trong vùng crop
-                                try:
-                                    res_js = target_page.evaluate('''() => {
-                                        // Ưu tiên tìm trong container chứa react-transform-component
-                                        const cropEl = document.querySelector('.react-transform-component') || document.querySelector('[class*="transform-component"]');
-                                        if (cropEl) {
-                                            const modal = cropEl.closest('[role="dialog"]') || cropEl.closest('div[class*="modal"]') || cropEl.parentElement.parentElement;
-                                            if (modal) {
-                                                const btns = Array.from(modal.querySelectorAll('button'));
-                                                for (const b of btns) {
-                                                    const t = (b.innerText || '').trim().toLowerCase();
-                                                    if (t === 'apply' || t === 'áp dụng' || t.includes('apply') || t.includes('áp dụng')) {
-                                                        b.click();
-                                                        return 'crop_modal_apply_text';
-                                                    }
-                                                }
-                                                // Nếu không thấy chữ, nút Apply thường là nút cuối cùng trong modal crop
-                                                if (btns.length >= 2) {
-                                                    btns[btns.length - 1].click();
-                                                    return 'crop_modal_last_btn';
-                                                }
-                                            }
-                                        }
-                                        // Tìm trên toàn trang các nút có text Apply hoặc Áp dụng
-                                        const allBtns = Array.from(document.querySelectorAll('button'));
-                                        for (const b of allBtns) {
-                                            const t = (b.innerText || '').trim().toLowerCase();
-                                            if (t === 'apply' || t === 'áp dụng') {
-                                                b.click();
-                                                return 'doc_apply_text';
-                                            }
-                                        }
-                                        return null;
-                                    }''')
-                                    if res_js:
-                                        clicked_apply = True
-                                        self.background_log_signal.emit(f"✅ [TikTok] Đã bấm nút Apply cắt ảnh ({res_js}).")
-                                except Exception as e_crop_js:
-                                    self.background_log_signal.emit(f"ℹ️ [TikTok] JS Apply: {e_crop_js}")
-
-                                # 2. Nếu JS chưa bấm được, fallback qua Playwright locator
-                                if not clicked_apply:
-                                    apply_btn = target_page.locator('button:has-text("Apply"), button:has-text("Áp dụng")')
+                                for _ in range(5):
                                     if apply_btn.count() > 0:
-                                        apply_btn.first.click(force=True, timeout=5000)
-                                        clicked_apply = True
-                                        self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh (Playwright).")
-                                    else:
-                                        self.background_log_signal.emit("ℹ️ [TikTok] Không thấy popup cắt ảnh hoặc ảnh đã tự động được nạp.")
+                                        try:
+                                            apply_btn.first.click(force=True, timeout=3000)
+                                            clicked_apply = True
+                                            self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh (Playwright).")
+                                            break
+                                        except Exception:
+                                            pass
+                                    target_page.wait_for_timeout(1000)
+
+                                if not clicked_apply:
+                                    try:
+                                        target_page.evaluate('''() => {
+                                            const btns = Array.from(document.querySelectorAll('button'));
+                                            for (const b of btns) {
+                                                const t = (b.innerText || '').trim().toLowerCase();
+                                                if (t === 'apply' || t === 'áp dụng') { b.click(); return; }
+                                            }
+                                        }''')
+                                    except Exception:
+                                        pass
 
                                 # Chờ popup cắt ảnh đóng lại hoàn toàn để không che khuất các ô bên dưới
-                                target_page.wait_for_timeout(2500)
+                                target_page.wait_for_timeout(3000)
                             except Exception as err:
                                 self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload/cắt avatar: {err}")
                         else:
@@ -2480,30 +2456,18 @@ class MainWindow(QWidget):
                         nick_input = target_page.locator('input[placeholder="Name"], input[placeholder="Tên"], input[name="nickname"], div[data-e2e="edit-profile-name-input"] input')
                         if nick_input.count() > 0:
                             try:
-                                # Dùng force=True khi click để tránh bị overlay chặn tương tác pointer
-                                try:
-                                    nick_input.first.click(force=True, timeout=2000)
-                                except Exception:
-                                    pass
+                                nick_elem = nick_input.first
+                                nick_elem.click(force=True, timeout=3000)
+                                target_page.wait_for_timeout(500)
 
-                                # Điền tên nick
-                                nick_input.first.fill(chosen_nick, timeout=5000)
-
-                                # Đảm bảo React state cập nhật đúng qua JS event
-                                try:
-                                    target_page.evaluate(f'''() => {{
-                                        const inp = document.querySelector('input[placeholder="Name"], input[placeholder="Tên"], input[name="nickname"], div[data-e2e="edit-profile-name-input"] input');
-                                        if (inp) {{
-                                            inp.value = {json.dumps(chosen_nick)};
-                                            inp.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                            inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                        }}
-                                    }}''')
-                                except Exception:
-                                    pass
+                                # Dùng tổ hợp phím thực tế để xóa và gõ tên mới (kích hoạt đầy đủ React state)
+                                target_page.keyboard.press("Control+A")
+                                target_page.keyboard.press("Backspace")
+                                target_page.wait_for_timeout(300)
+                                target_page.keyboard.type(chosen_nick, delay=35)
+                                target_page.wait_for_timeout(500)
 
                                 self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick: '{chosen_nick}'.")
-                                target_page.wait_for_timeout(1000)
                             except Exception as err:
                                 self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi điền tên: {err}")
                         else:
@@ -2532,14 +2496,22 @@ class MainWindow(QWidget):
                                 self.background_log_signal.emit("⚠️ [TikTok] Nút Save vẫn đang disabled, click cưỡng bức (force=True)...")
                                 save_btn.first.click(force=True, timeout=4000)
 
-                            target_page.wait_for_timeout(2500)
+                            target_page.wait_for_timeout(2000)
 
                             # Nếu có modal xác nhận (Confirm tên chỉ được đổi 7 ngày 1 lần)
-                            confirm_modal = target_page.locator('button:has-text("Confirm"), button:has-text("Xác nhận")')
+                            confirm_modal = target_page.locator('div[role="dialog"] button:has-text("Confirm"), div[role="dialog"] button:has-text("Xác nhận"), button:has-text("Confirm"), button:has-text("Xác nhận")')
                             if confirm_modal.count() > 0:
                                 self.background_log_signal.emit("👆 [TikTok] Xác nhận modal đổi tên...")
                                 confirm_modal.first.click(timeout=4000)
+                                target_page.wait_for_timeout(3000)
+
+                            # Tải lại trang để đồng bộ hiển thị mới nhất
+                            self.background_log_signal.emit("🔄 [TikTok] Đang tải lại trang hồ sơ để đồng bộ...")
+                            try:
+                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
                                 target_page.wait_for_timeout(2000)
+                            except Exception:
+                                pass
 
                             self.background_log_signal.emit("🎉 [TikTok] QUY TRÌNH ĐỔI TÊN & AVATAR ĐÃ HOÀN TẤT THÀNH CÔNG!")
                         except Exception as err:
@@ -2911,47 +2883,60 @@ class MainWindow(QWidget):
         else:
             self.log_output.append("⚠️ Không tìm thấy mật khẩu email để copy!")
 
-    def fetch_and_copy_otp(self):
-        # Lấy chuỗi từ ô kết quả thay vì ô email khôi phục
-        result_acc = self.result_output.text().strip()
-        
-        if not result_acc or '|' not in result_acc:
-            self.log_output.append("⚠️ Chưa có kết quả tài khoản hoặc chuỗi kết quả không hợp lệ để lấy OTP!")
-            return
-        
-        # Tách chuỗi kết quả: dạng userid|tk|mk|outh2|clientid hoặc tk|mk|outh2|clientid
-        parts = result_acc.split('|')
-        
-        # Kiểm tra xem chuỗi có đủ thông tin oauth2 và clientid ở đuôi không (thường >= 4 phần)
-        if len(parts) >= 4:
-            # Lấy 2 phần cuối cùng làm oAuth2 và Client ID
-            outh2 = parts[-2].strip()
-            client_id = parts[-1].strip()
-            
-            # Lấy thông tin tk/mk đứng trước đó để làm định dạng chuẩn cho hàm API đọc
-            # Nếu có userid ở đầu thì tk là phần áp chót, còn không thì lùi về trước
-            tk = parts[-3].strip() # Hoặc phần tk tương ứng
-            mk = parts[-4].strip() if len(parts) >= 5 else parts[0].strip()
-            
-            # Gom lại thành chuỗi chuẩn tk|mk|outh2|clientId mà hàm get_outlook_otp_via_api yêu cầu
-            target_recovery_str = f"dummy|dummy|{outh2}|{client_id}"
-        else:
-            self.log_output.append("❌ Chuỗi kết quả chưa đủ định dạng OAuth2 và Client ID để lấy OTP!")
-            return
-        
-        self.log_output.append("🔄 Đang chủ động quét OTP từ tài khoản kết quả...")
-        
-        class DummySignal:
-            def __init__(self, log_widget): self.log = log_widget
-            def emit(self, msg): self.log.append(msg)
-            
-        dummy_sig = DummySignal(self.log_output)
-        otp = get_outlook_otp_via_api(target_recovery_str, dummy_sig)
+    def on_otp_received(self, otp):
+        """Nhận kết quả OTP từ luồng ngầm và copy vào clipboard an toàn trên main thread"""
         if otp:
             QApplication.clipboard().setText(otp)
             self.log_output.append(f"🎯 ĐÃ COPY MÃ OTP VÀO BỘ NHỚ TẠM: {otp}")
         else:
             self.log_output.append("❌ Không tìm thấy mã OTP nào từ tài khoản này!")
+
+    def fetch_and_copy_otp(self):
+        """Quét và lấy mã OTP qua API ngầm trong luồng riêng, không làm đơ/lag giao diện (GUI)"""
+        # Lấy chuỗi từ ô kết quả (nếu chưa có thì thử lấy ở ô tài khoản nhập vào)
+        result_acc = self.result_output.text().strip()
+        if not result_acc or '|' not in result_acc:
+            result_acc = self.acc_input.text().strip()
+        
+        if not result_acc or '|' not in result_acc:
+            self.log_output.append("⚠️ Chưa có kết quả tài khoản hoặc chuỗi không hợp lệ để lấy OTP (cần có OAuth2|ClientID)!")
+            return
+        
+        # Tách chuỗi kết quả: dạng userid|tk|mk|outh2|clientid hoặc tk|mk|outh2|clientid hoặc outh2|clientid
+        parts = result_acc.split('|')
+        
+        # Kiểm tra xem chuỗi có đủ thông tin oauth2 và clientid không
+        if len(parts) >= 4:
+            # Lấy 2 phần cuối cùng làm oAuth2 và Client ID
+            outh2 = parts[-2].strip()
+            client_id = parts[-1].strip()
+            target_recovery_str = f"dummy|dummy|{outh2}|{client_id}"
+        elif len(parts) == 2:
+            outh2 = parts[0].strip()
+            client_id = parts[1].strip()
+            target_recovery_str = f"dummy|dummy|{outh2}|{client_id}"
+        else:
+            self.log_output.append("❌ Chuỗi chưa đủ định dạng OAuth2 và Client ID để lấy OTP (cần tk|mk|oauth2|client_id)!")
+            return
+        
+        self.log_output.append("🚀 Đang khởi chạy luồng quét OTP ngầm (giao diện không bị lag)...")
+        
+        def run_otp_worker():
+            class ThreadSignal:
+                def __init__(self, emit_fn):
+                    self.emit_fn = emit_fn
+                def emit(self, msg):
+                    self.emit_fn(msg)
+
+            sig = ThreadSignal(self.background_log_signal.emit)
+            try:
+                otp = get_outlook_otp_via_api(target_recovery_str, sig)
+                self.otp_received_signal.emit(otp or "")
+            except Exception as e:
+                self.background_log_signal.emit(f"❌ Lỗi trong luồng lấy OTP: {str(e)}")
+                self.otp_received_signal.emit("")
+
+        threading.Thread(target=run_otp_worker, daemon=True).start()
 
     def update_log(self, message):
         self.log_output.append(message)
