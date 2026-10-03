@@ -422,9 +422,135 @@ def generate_fake_fingerprint():
     }
 
 
+# ========================================================
+# QUẢN LÝ TỆP TIN & DANH SÁCH (RECOVERY EMAILS & TIKTOK)
+# ========================================================
+def get_app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+APP_DIR = get_app_dir()
+RECOVERY_EMAILS_FILE = os.path.join(APP_DIR, "recovery_emails.txt")
+NICKNAMES_FILE = os.path.join(APP_DIR, "nicknames.txt")
+AVATARS_DIR = os.path.join(APP_DIR, "avatars")
+
+os.makedirs(AVATARS_DIR, exist_ok=True)
+
+def load_recovery_emails():
+    candidate_paths = [
+        RECOVERY_EMAILS_FILE,
+        os.path.join(APP_DIR, "recovery_emails.txt"),
+        os.path.join(APP_DIR, "dist", "recovery_emails.txt"),
+        os.path.join(os.path.dirname(APP_DIR), "recovery_emails.txt"),
+        r"E:\Outh2 hotmail\recovery_emails.txt",
+        r"E:\Outh2 hotmail\dist\recovery_emails.txt",
+    ]
+    for p in candidate_paths:
+        if p and os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+                    if lines:
+                        return lines
+            except Exception:
+                pass
+    return []
+
+def save_recovery_emails(email_list):
+    target_files = set()
+    candidate_paths = [
+        RECOVERY_EMAILS_FILE,
+        os.path.join(APP_DIR, "recovery_emails.txt"),
+        os.path.join(APP_DIR, "dist", "recovery_emails.txt"),
+        os.path.join(os.path.dirname(APP_DIR), "recovery_emails.txt"),
+        r"E:\Outh2 hotmail\recovery_emails.txt",
+        r"E:\Outh2 hotmail\dist\recovery_emails.txt",
+    ]
+    for p in candidate_paths:
+        if p and os.path.exists(os.path.dirname(p)):
+            target_files.add(os.path.abspath(p))
+
+    for target in target_files:
+        try:
+            with open(target, "w", encoding="utf-8") as f:
+                for item in email_list:
+                    if item.strip():
+                        f.write(item.strip() + "\n")
+        except Exception as e:
+            safe_print(f"Lỗi lưu recovery emails tới {target}: {e}")
+
+def rotate_and_save_recovery_email(failed_recovery=None, log_signal=None, recovery_changed_signal=None):
+    """
+    Khi gặp lỗi (ví dụ 'Something went wrong' khi gửi OTP tới email khôi phục),
+    tự động xoay sang email khôi phục kế tiếp trong danh sách, đưa email bị lỗi xuống cuối,
+    và LƯU VĨNH VIỄN vào file recovery_emails.txt.
+    Tắt tool bật lại vẫn giữ nguyên email mới này làm mặc định.
+    """
+    emails = load_recovery_emails()
+    if not emails:
+        return []
+
+    failed_target = None
+    if failed_recovery:
+        failed_clean = failed_recovery.split('|')[0].strip().lower()
+        for em in emails:
+            em_clean = em.split('|')[0].strip().lower()
+            if em_clean == failed_clean:
+                failed_target = em
+                break
+
+    if not failed_target:
+        failed_target = emails[0]
+
+    # Đưa email bị lỗi xuống cuối danh sách
+    new_list = [em for em in emails if em != failed_target]
+    new_list.append(failed_target)
+
+    # Lưu vĩnh viễn vào tất cả các file recovery_emails.txt
+    save_recovery_emails(new_list)
+
+    new_active = new_list[0]
+    new_email_addr = new_active.split('|')[0].strip()
+    failed_addr = failed_target.split('|')[0].strip()
+
+    if log_signal:
+        log_signal.emit(f"🔄 [Đổi Email Khôi Phục Vĩnh Viễn] Phát hiện lỗi với: {failed_addr}")
+        log_signal.emit(f"💾 ĐÃ LƯU CẤU HÌNH: Đã chuyển vĩnh viễn sang email '{new_email_addr}'. Email lỗi '{failed_addr}' đã chuyển xuống cuối danh sách.")
+
+    if recovery_changed_signal:
+        recovery_changed_signal.emit(new_active)
+
+    return new_list
+
+def load_nicknames():
+    if not os.path.isfile(NICKNAMES_FILE):
+        return []
+    try:
+        with open(NICKNAMES_FILE, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+    except Exception:
+        return []
+
+def save_nicknames(nick_list):
+    try:
+        with open(NICKNAMES_FILE, "w", encoding="utf-8") as f:
+            for item in nick_list:
+                if item.strip():
+                    f.write(item.strip() + "\n")
+    except Exception as e:
+        safe_print(f"Lỗi lưu nicknames: {e}")
+
+
 class MicrosoftSessionResetException(BaseException):
     """Ngoại lệ kích hoạt khi Microsoft gặp lỗi 'Something went wrong', yêu cầu tắt hẳn Chrome và mở Chrome mới chạy lại từ đầu."""
-    pass
+    def __init__(self, message, failed_recovery=None):
+        super().__init__(message)
+        self.message = message
+        self.failed_recovery = failed_recovery
+
+    def __str__(self):
+        return self.message
 
 
 async def _run_single_account_session(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
@@ -748,9 +874,15 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
 
                 # Check nếu hiện màn hình lỗi "Something went wrong." của Microsoft
                 content_lower = content.lower()
-                if "something went wrong" in content_lower or "we can't complete your request right now" in content_lower:
-                    log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tắt Chrome để chạy lại từ đầu...")
-                    raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 3")
+                if (
+                    "something went wrong" in content_lower 
+                    or "we can't complete your request right now" in content_lower
+                    or "try again later" in content_lower
+                    or "there's a temporary problem" in content_lower
+                ):
+                    failed_rec = recovery_list[0] if recovery_list else None
+                    log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tắt Chrome để đổi email khôi phục và chạy lại...")
+                    raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 3", failed_recovery=failed_rec)
 
                 # Check nếu hiện màn hình Passkey (FIDO) / Windows Hello
                 is_passkey_screen = (
@@ -796,100 +928,95 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                             continue
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
-                        
-                        # Cho phép thử lại email này tối đa 2 lần nếu bị dính lỗi Something went wrong
-                        for email_attempt in range(2):
-                            try:
-                                # Nếu trang đang ở màn hình Something went wrong, F5 reload trước
-                                cur_c = (await page.content()).lower()
-                                if "something went wrong" in cur_c or "we can't complete your request right now" in cur_c:
-                                    log_signal.emit("🔄 [Microsoft] Màn hình đang bị 'Something went wrong', đang F5 (Reload) lại trang...")
-                                    await page.reload(wait_until="domcontentloaded")
-                                    await asyncio.sleep(3)
+                        try:
+                            cur_c = (await page.content()).lower()
+                            if (
+                                "something went wrong" in cur_c 
+                                or "we can't complete your request right now" in cur_c 
+                                or "try again later" in cur_c 
+                                or "there's a temporary problem" in cur_c
+                            ):
+                                log_signal.emit(f"🛑 [Microsoft] Màn hình bị lỗi 'Something went wrong' với email {rec_email}. Đang tắt Chrome để đổi email...")
+                                raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}", failed_recovery=cur_recovery)
 
-                                # Ở trang Help protect, phải bấm Add email để mở ô nhập.
-                                if not await new_recovery_input.is_visible():
-                                    add_email_button = page.get_by_role(
-                                        "button", name=re.compile(r"^Add email$", re.I)
+                            # Ở trang Help protect, phải bấm Add email để mở ô nhập.
+                            if not await new_recovery_input.is_visible():
+                                add_email_button = page.get_by_role(
+                                    "button", name=re.compile(r"^Add email$", re.I)
+                                )
+                                if await add_email_button.count() > 0:
+                                    await add_email_button.click(timeout=10000)
+                                    await page.wait_for_selector(
+                                        "#floatingLabelInput10",
+                                        state="visible",
+                                        timeout=15000
                                     )
-                                    if await add_email_button.count() > 0:
-                                        await add_email_button.click(timeout=10000)
-                                        await page.wait_for_selector(
-                                            "#floatingLabelInput10",
-                                            state="visible",
-                                            timeout=15000
-                                        )
 
-                                await new_recovery_input.fill("")
-                                await new_recovery_input.fill(rec_email)
+                            await new_recovery_input.fill("")
+                            await new_recovery_input.fill(rec_email)
 
-                                await new_primary_button.wait_for(state="visible", timeout=10000)
-                                await new_primary_button.click(timeout=10000)
+                            await new_primary_button.wait_for(state="visible", timeout=10000)
+                            await new_primary_button.click(timeout=10000)
 
-                                # Chờ xem có xuất hiện ô OTP không hoặc bị dính Something went wrong
-                                otp_appeared = False
-                                hit_sww = False
-                                for _ in range(8):
-                                    await pause_event.wait()
-                                    if await page.is_visible("#codeEntry-0"):
-                                        otp_appeared = True
+                            # Chờ xem có xuất hiện ô OTP không hoặc bị dính Something went wrong
+                            otp_appeared = False
+                            hit_sww = False
+                            for _ in range(8):
+                                await pause_event.wait()
+                                if await page.is_visible("#codeEntry-0"):
+                                    otp_appeared = True
+                                    break
+                                try:
+                                    check_c = (await page.content()).lower()
+                                    if (
+                                        "something went wrong" in check_c 
+                                        or "we can't complete your request right now" in check_c 
+                                        or "try again later" in check_c 
+                                        or "there's a temporary problem" in check_c
+                                    ):
+                                        hit_sww = True
                                         break
-                                    try:
-                                        check_c = (await page.content()).lower()
-                                        if "something went wrong" in check_c or "we can't complete your request right now" in check_c:
-                                            hit_sww = True
-                                            break
-                                    except:
-                                        pass
-                                    await asyncio.sleep(1)
+                                except:
+                                    pass
+                                await asyncio.sleep(1)
 
-                                if hit_sww:
-                                    log_signal.emit(f"🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang tắt Chrome để chạy lại từ đầu...")
-                                    raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}")
+                            if hit_sww:
+                                log_signal.emit(f"🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang tắt Chrome để đổi email...")
+                                raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}", failed_recovery=cur_recovery)
 
-                                if not otp_appeared:
-                                    log_signal.emit(f"⚠️ Email {rec_email} không xuất hiện ô OTP (có thể bị giới hạn hoặc lỗi).")
-                                    if rec_idx + 1 < len(recovery_list):
-                                        log_signal.emit("🔄 Đang thử quay lại để đổi sang email khôi phục tiếp theo...")
-                                        btn_back = page.locator("button:has-text('Back'), #idBtn_Back, button[aria-label='Back']")
-                                        if await btn_back.count() > 0:
-                                            await btn_back.first.click(timeout=3000)
-                                            await asyncio.sleep(2)
-                                    break
+                            if not otp_appeared:
+                                log_signal.emit(f"⚠️ Email {rec_email} không xuất hiện ô OTP. Đang tắt Chrome để chuyển email...")
+                                raise MicrosoftSessionResetException(f"Không xuất hiện ô OTP cho email {rec_email}", failed_recovery=cur_recovery)
 
-                                log_signal.emit(f"⏳ Đang đợi OTP cho email {rec_email}...")
-                                otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
-                                if otp_code:
-                                    otp_digits = str(otp_code).strip()
-                                    otp_inputs = page.locator("input[id^='codeEntry-']")
-                                    input_count = await otp_inputs.count()
-                                    if len(otp_digits) != input_count:
-                                        raise RuntimeError(
-                                            f"OTP có {len(otp_digits)} số nhưng trang yêu cầu {input_count} số"
-                                        )
+                            log_signal.emit(f"⏳ Đang đợi OTP cho email {rec_email}...")
+                            otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
+                            if otp_code:
+                                otp_digits = str(otp_code).strip()
+                                otp_inputs = page.locator("input[id^='codeEntry-']")
+                                input_count = await otp_inputs.count()
+                                if len(otp_digits) != input_count:
+                                    raise RuntimeError(
+                                        f"OTP có {len(otp_digits)} số nhưng trang yêu cầu {input_count} số"
+                                    )
 
-                                    for index, digit in enumerate(otp_digits):
-                                        await page.fill(f"#codeEntry-{index}", digit)
+                                for index, digit in enumerate(otp_digits):
+                                    await page.fill(f"#codeEntry-{index}", digit)
 
-                                    log_signal.emit(f"✅ Đã điền OTP vào 6 ô từ email {rec_email} thành công.")
-                                    await asyncio.sleep(4)
-                                    recovery_success = True
-                                    break
-                                else:
-                                    log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
-                                    if rec_idx + 1 < len(recovery_list):
-                                        log_signal.emit("🔄 Đang tự động đổi sang email khôi phục tiếp theo trong list...")
-                                        btn_back = page.locator("button:has-text('Back'), #idBtn_Back, a:has-text('Back'), a:has-text('Cancel')")
-                                        if await btn_back.count() > 0:
-                                            await btn_back.first.click(timeout=3000)
-                                            await asyncio.sleep(2)
-                                    break
-                            except Exception as e:
-                                log_signal.emit(f"⚠️ Lỗi xử lý email {rec_email}: {str(e)}")
+                                log_signal.emit(f"✅ Đã điền OTP vào 6 ô từ email {rec_email} thành công.")
+                                await asyncio.sleep(4)
+                                recovery_success = True
                                 break
-
-                        if recovery_success:
+                            else:
+                                log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}. Đang đổi sang email khác...")
+                                raise MicrosoftSessionResetException(f"Không lấy được OTP cho email {rec_email}", failed_recovery=cur_recovery)
+                        except MicrosoftSessionResetException:
+                            raise
+                        except Exception as e:
+                            log_signal.emit(f"⚠️ Lỗi xử lý email {rec_email}: {str(e)}")
                             break
+
+                    if recovery_success:
+                        break
 
                     if not recovery_success:
                         log_signal.emit("⚠️ Đã thử hết danh sách email khôi phục.")
@@ -909,76 +1036,75 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                             continue
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
-                        for email_attempt in range(2):
-                            try:
-                                cur_c = (await page.content()).lower()
-                                if "something went wrong" in cur_c or "we can't complete your request right now" in cur_c:
-                                    log_signal.emit("🔄 [Microsoft] Đang ở trang 'Something went wrong', F5 reload lại...")
-                                    await page.reload(wait_until="domcontentloaded")
-                                    await asyncio.sleep(3)
+                        try:
+                            cur_c = (await page.content()).lower()
+                            if (
+                                "something went wrong" in cur_c 
+                                or "we can't complete your request right now" in cur_c 
+                                or "try again later" in cur_c 
+                                or "there's a temporary problem" in cur_c
+                            ):
+                                log_signal.emit(f"🛑 [Microsoft] Đang ở trang 'Something went wrong'. Đang tắt Chrome để đổi email...")
+                                raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}", failed_recovery=cur_recovery)
 
-                                await page.wait_for_selector("#EmailAddress", state="visible", timeout=10000)
-                                await page.fill("#EmailAddress", "")
-                                await page.fill("#EmailAddress", rec_email)
-                                await asyncio.sleep(1)
-                                await page.click("#iNext")
-                                await asyncio.sleep(3)
-                                
-                                # Chờ ô nhập OTP hoặc dính Something went wrong
-                                otp_appeared = False
-                                hit_sww = False
-                                for _ in range(8):
-                                    await pause_event.wait()
-                                    if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
-                                        otp_appeared = True
+                            await page.wait_for_selector("#EmailAddress", state="visible", timeout=10000)
+                            await page.fill("#EmailAddress", "")
+                            await page.fill("#EmailAddress", rec_email)
+                            await asyncio.sleep(1)
+                            await page.click("#iNext")
+                            await asyncio.sleep(3)
+                            
+                            # Chờ ô nhập OTP hoặc dính Something went wrong
+                            otp_appeared = False
+                            hit_sww = False
+                            for _ in range(8):
+                                await pause_event.wait()
+                                if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
+                                    otp_appeared = True
+                                    break
+                                try:
+                                    check_c = (await page.content()).lower()
+                                    if (
+                                        "something went wrong" in check_c 
+                                        or "we can't complete your request right now" in check_c 
+                                        or "try again later" in check_c 
+                                        or "there's a temporary problem" in check_c
+                                    ):
+                                        hit_sww = True
                                         break
-                                    try:
-                                        check_c = (await page.content()).lower()
-                                        if "something went wrong" in check_c or "we can't complete your request right now" in check_c:
-                                            hit_sww = True
-                                            break
-                                    except:
-                                        pass
-                                    await asyncio.sleep(1)
+                                except:
+                                    pass
+                                await asyncio.sleep(1)
 
-                                if hit_sww:
-                                    log_signal.emit(f"🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang tắt Chrome để chạy lại từ đầu...")
-                                    raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}")
+                            if hit_sww:
+                                log_signal.emit(f"🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang tắt Chrome để đổi email...")
+                                raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}", failed_recovery=cur_recovery)
 
-                                if not otp_appeared:
-                                    log_signal.emit(f"⚠️ Email {rec_email} không mở được ô nhập OTP.")
-                                    if rec_idx + 1 < len(recovery_list):
-                                        btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
-                                        if await btn_back.count() > 0:
-                                            await btn_back.first.click(timeout=3000)
-                                            await asyncio.sleep(2)
-                                    break
+                            if not otp_appeared:
+                                log_signal.emit(f"⚠️ Email {rec_email} không mở được ô nhập OTP. Đang tắt Chrome để đổi email...")
+                                raise MicrosoftSessionResetException(f"Không mở được ô nhập OTP cho email {rec_email}", failed_recovery=cur_recovery)
 
-                                # Bắt mã OTP
-                                log_signal.emit(f"⏳ Đang đợi mã OTP từ email: {rec_email}...")
-                                otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
-                                if otp_code:
-                                    await page.fill("input[type='tel'], input[name='otc'], input[id*='otc']", otp_code)
-                                    await page.click("#iNext, #idSIButton9")
-                                    await asyncio.sleep(3)
-                                    recovery_success = True
-                                    log_signal.emit(f"✅ Đã điền OTP thành công cho email: {rec_email}")
-                                    break
-                                else:
-                                    log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
-                                    if rec_idx + 1 < len(recovery_list):
-                                        log_signal.emit("🔄 Đang thử quay lại để đổi email khôi phục tiếp theo...")
-                                        btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
-                                        if await btn_back.count() > 0:
-                                            await btn_back.first.click(timeout=3000)
-                                            await asyncio.sleep(2)
-                                    break
-                            except Exception as e:
-                                log_signal.emit(f"⚠️ Lỗi thử email {rec_email}: {str(e)}")
+                            # Bắt mã OTP
+                            log_signal.emit(f"⏳ Đang đợi mã OTP từ email: {rec_email}...")
+                            otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
+                            if otp_code:
+                                await page.fill("input[type='tel'], input[name='otc'], input[id*='otc']", otp_code)
+                                await page.click("#iNext, #idSIButton9")
+                                await asyncio.sleep(3)
+                                recovery_success = True
+                                log_signal.emit(f"✅ Đã điền OTP thành công cho email: {rec_email}")
                                 break
-
-                        if recovery_success:
+                            else:
+                                log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}. Đang đổi sang email khác...")
+                                raise MicrosoftSessionResetException(f"Không lấy được OTP cho email {rec_email}", failed_recovery=cur_recovery)
+                        except MicrosoftSessionResetException:
+                            raise
+                        except Exception as e:
+                            log_signal.emit(f"⚠️ Lỗi thử email {rec_email}: {str(e)}")
                             break
+
+                    if recovery_success:
+                        break
 
                     if not recovery_success:
                         log_signal.emit("⚠️ Đã thử hết danh sách email khôi phục.")
@@ -1007,9 +1133,15 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
 
                     # Check nếu bị dính màn hình lỗi "Something went wrong"
                     content_b4 = (await page.content()).lower()
-                    if "something went wrong" in content_b4 or "we can't complete your request right now" in content_b4:
-                        log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong' tại Bước 4. Đang tắt Chrome để chạy lại từ đầu...")
-                        raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 4")
+                    if (
+                        "something went wrong" in content_b4 
+                        or "we can't complete your request right now" in content_b4 
+                        or "try again later" in content_b4 
+                        or "there's a temporary problem" in content_b4
+                    ):
+                        failed_rec = recovery_list[0] if recovery_list else None
+                        log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong' tại Bước 4. Đang tắt Chrome để đổi email và chạy lại...")
+                        raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 4", failed_recovery=failed_rec)
 
                     # Bỏ qua màn hình Passkey nếu xuất hiện ở bước này
                     if "fido" in page.url.lower() or "passkey" in content_b4:
@@ -1030,7 +1162,9 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         await page.click(sel_skip, force=True)
                         await asyncio.sleep(2) 
                         continue 
-                except:
+                except MicrosoftSessionResetException:
+                    raise
+                except Exception:
                     continue
                 
                 if await page.is_visible(sel_stay):
@@ -1103,30 +1237,43 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
             log_signal.emit(f"⚠️ Lỗi trong trình duyệt: {str(e)[:50]}")
 
 
-async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
+async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event, recovery_changed_signal=None):
     await pause_event.wait()
     if isinstance(recovery_list, str):
-        recovery_list = [recovery_list] if recovery_list.strip() else []
+        current_recovery_list = [recovery_list] if recovery_list.strip() else []
     elif not recovery_list:
-        recovery_list = []
+        current_recovery_list = []
+    else:
+        current_recovery_list = list(recovery_list)
 
-    max_restarts = 3
+    max_restarts = max(5, len(current_recovery_list) + 1)
     for attempt_round in range(1, max_restarts + 1):
         if attempt_round > 1:
-            log_signal.emit(f"🔄 [Lần {attempt_round}/{max_restarts}] Đang tắt Chrome cũ và mở Chrome mới để chạy lại từ đầu...")
+            log_signal.emit(f"🔄 [Lần thử {attempt_round}/{max_restarts}] Đang tắt Chrome cũ và mở Chrome mới để chạy lại từ đầu...")
             await asyncio.sleep(2)
 
         try:
-            await _run_single_account_session(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event)
+            await _run_single_account_session(raw_input_str, email, password, current_recovery_list, log_signal, result_signal, pause_event)
             return
         except MicrosoftSessionResetException as ms_err:
             log_signal.emit(f"🛑 [Reset Chrome] {str(ms_err)}. Đã đóng hoàn toàn trình duyệt Chrome cũ.")
+            failed_target = ms_err.failed_recovery or (current_recovery_list[0] if current_recovery_list else None)
+
+            # Xoay email khôi phục và LƯU VĨNH VIỄN vào file + cập nhật combobox GUI
+            new_list = rotate_and_save_recovery_email(
+                failed_recovery=failed_target,
+                log_signal=log_signal,
+                recovery_changed_signal=recovery_changed_signal
+            )
+            if new_list:
+                current_recovery_list = new_list
+
             if attempt_round < max_restarts:
-                log_signal.emit(f"🔄 Chuẩn bị mở Chrome mới với bộ vân tay mới để đăng nhập lại từ đầu...")
+                log_signal.emit("🔄 Chuẩn bị mở Chrome mới với bộ vân tay mới và email khôi phục mới để đăng nhập lại...")
                 await asyncio.sleep(2)
                 continue
             else:
-                log_signal.emit(f"❌ Đã thử lại {max_restarts} lần với Chrome mới nhưng Microsoft vẫn báo lỗi 'Something went wrong'.")
+                log_signal.emit(f"❌ Đã thử lại {max_restarts} lần với các email khôi phục khác nhau nhưng Microsoft vẫn báo lỗi.")
                 return
         except Exception as e:
             log_signal.emit(f"⚠️ Lỗi xử lý tài khoản: {str(e)[:80]}")
@@ -1137,6 +1284,7 @@ class AutomationWorker(QThread):
     log_signal = pyqtSignal(str)
     result_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
+    recovery_changed_signal = pyqtSignal(str)
 
     def __init__(self, target_acc, recovery_list):
         super().__init__()
@@ -1176,7 +1324,11 @@ class AutomationWorker(QThread):
         self.pause_event.set() 
 
         try:
-            loop.run_until_complete(process_single_account(self.target_acc, email, password, self.recovery_list, self.log_signal, self.result_signal, self.pause_event))
+            loop.run_until_complete(process_single_account(
+                self.target_acc, email, password, self.recovery_list, 
+                self.log_signal, self.result_signal, self.pause_event,
+                recovery_changed_signal=self.recovery_changed_signal
+            ))
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -1202,55 +1354,8 @@ class AutomationWorker(QThread):
 
 
 # ========================================================
-# QUẢN LÝ TỆP TIN & HỘP THOẠI DANH SÁCH (RECOVERY & TIKTOK)
+# HỘP THOẠI DANH SÁCH (RECOVERY & TIKTOK)
 # ========================================================
-def get_app_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
-
-APP_DIR = get_app_dir()
-RECOVERY_EMAILS_FILE = os.path.join(APP_DIR, "recovery_emails.txt")
-NICKNAMES_FILE = os.path.join(APP_DIR, "nicknames.txt")
-AVATARS_DIR = os.path.join(APP_DIR, "avatars")
-
-os.makedirs(AVATARS_DIR, exist_ok=True)
-
-def load_recovery_emails():
-    if not os.path.isfile(RECOVERY_EMAILS_FILE):
-        return []
-    try:
-        with open(RECOVERY_EMAILS_FILE, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
-    except Exception:
-        return []
-
-def save_recovery_emails(email_list):
-    try:
-        with open(RECOVERY_EMAILS_FILE, "w", encoding="utf-8") as f:
-            for item in email_list:
-                if item.strip():
-                    f.write(item.strip() + "\n")
-    except Exception as e:
-        safe_print(f"Lỗi lưu recovery emails: {e}")
-
-def load_nicknames():
-    if not os.path.isfile(NICKNAMES_FILE):
-        return []
-    try:
-        with open(NICKNAMES_FILE, "r", encoding="utf-8") as f:
-            return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
-    except Exception:
-        return []
-
-def save_nicknames(nick_list):
-    try:
-        with open(NICKNAMES_FILE, "w", encoding="utf-8") as f:
-            for item in nick_list:
-                if item.strip():
-                    f.write(item.strip() + "\n")
-    except Exception as e:
-        safe_print(f"Lỗi lưu nicknames: {e}")
 
 def get_random_avatar():
     if not os.path.isdir(AVATARS_DIR):
@@ -2331,18 +2436,23 @@ class MainWindow(QWidget):
         self.setLayout(main_layout)
         self.refresh_recovery_combo()
 
-    def refresh_recovery_combo(self):
-        current_text = self.recovery_combo.currentText().strip()
+    def refresh_recovery_combo(self, select_email=None):
+        target = select_email.strip() if select_email else self.recovery_combo.currentText().strip()
         self.recovery_combo.clear()
         emails = load_recovery_emails()
         for em in emails:
             self.recovery_combo.addItem(em)
-        if current_text:
-            idx = self.recovery_combo.findText(current_text)
+        if target:
+            idx = self.recovery_combo.findText(target)
             if idx >= 0:
                 self.recovery_combo.setCurrentIndex(idx)
             else:
-                self.recovery_combo.setEditText(current_text)
+                self.recovery_combo.setEditText(target)
+        elif emails:
+            self.recovery_combo.setCurrentIndex(0)
+
+    def on_recovery_email_changed(self, new_email_str):
+        self.refresh_recovery_combo(select_email=new_email_str)
 
     def open_recovery_dialog(self):
         dlg = RecoveryEmailsDialog(self)
@@ -3028,6 +3138,7 @@ class MainWindow(QWidget):
         self.worker = AutomationWorker(target_acc, recovery_list)
         self.worker.log_signal.connect(self.update_log)
         self.worker.result_signal.connect(self.show_result)
+        self.worker.recovery_changed_signal.connect(self.on_recovery_email_changed)
         self.worker.finished_signal.connect(lambda: self.btn_start.setEnabled(True))
         self.worker.start()
         
