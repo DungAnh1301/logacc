@@ -2490,7 +2490,7 @@ class MainWindow(QWidget):
                                 target_page.wait_for_timeout(1000)
 
                             if save_ready:
-                                save_btn.first.click(timeout=5000)
+                                save_btn.first.click(force=True, timeout=5000)
                                 self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Save lưu thay đổi!")
                             else:
                                 self.background_log_signal.emit("⚠️ [TikTok] Nút Save vẫn đang disabled, click cưỡng bức (force=True)...")
@@ -2498,20 +2498,82 @@ class MainWindow(QWidget):
 
                             target_page.wait_for_timeout(2000)
 
-                            # Nếu có modal xác nhận (Confirm tên chỉ được đổi 7 ngày 1 lần)
-                            confirm_modal = target_page.locator('div[role="dialog"] button:has-text("Confirm"), div[role="dialog"] button:has-text("Xác nhận"), button:has-text("Confirm"), button:has-text("Xác nhận")')
-                            if confirm_modal.count() > 0:
-                                self.background_log_signal.emit("👆 [TikTok] Xác nhận modal đổi tên...")
-                                confirm_modal.first.click(timeout=4000)
-                                target_page.wait_for_timeout(3000)
+                            # Chờ và bấm modal xác nhận nếu có (Confirm tên chỉ được đổi 7 ngày 1 lần)
+                            self.background_log_signal.emit("🔍 [TikTok] Kiểm tra modal xác nhận đổi tên (Confirm)...")
+                            confirm_modal = target_page.locator('div[role="dialog"] button:has-text("Confirm"), div[role="dialog"] button:has-text("Xác nhận"), div[role="dialog"] button:has-text("Change"), div[role="dialog"] button:has-text("Đổi"), button:has-text("Confirm"), button:has-text("Xác nhận")')
+                            
+                            clicked_confirm = False
+                            for _ in range(5):
+                                if confirm_modal.count() > 0:
+                                    try:
+                                        self.background_log_signal.emit("👆 [TikTok] Đã phát hiện modal xác nhận. Đang bấm Confirm...")
+                                        confirm_modal.first.click(force=True, timeout=3000)
+                                        clicked_confirm = True
+                                        break
+                                    except Exception:
+                                        pass
+                                target_page.wait_for_timeout(1000)
 
-                            # Tải lại trang để đồng bộ hiển thị mới nhất
-                            self.background_log_signal.emit("🔄 [TikTok] Đang tải lại trang hồ sơ để đồng bộ...")
-                            try:
-                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
+                            if not clicked_confirm:
+                                try:
+                                    target_page.evaluate('''() => {
+                                        const dialogs = document.querySelectorAll('div[role="dialog"]');
+                                        for (const d of dialogs) {
+                                            const btns = d.querySelectorAll('button');
+                                            for (const b of btns) {
+                                                const txt = (b.innerText || '').trim().toLowerCase();
+                                                if (txt === 'confirm' || txt === 'xác nhận' || txt === 'change' || txt === 'đổi') {
+                                                    b.click();
+                                                    return true;
+                                                }
+                                            }
+                                        }
+                                        return false;
+                                    }''')
+                                except Exception:
+                                    pass
+
+                            # Chờ máy chủ TikTok xử lý lưu
+                            self.background_log_signal.emit("⏳ [TikTok] Đang đợi TikTok lưu thông tin lên máy chủ...")
+                            target_page.wait_for_timeout(4000)
+
+                            # 7. BƯỚC 6: KIỂM TRA LẠI HTML VÀ TỰ ĐỘNG F5 (RELOAD) NẾU CHƯA THAY ĐỔI
+                            self.background_log_signal.emit("🔍 [Bước 6: Kiểm tra HTML] Đang kiểm tra xem thông tin hồ sơ đã cập nhật chưa...")
+                            
+                            info_updated = False
+                            for check_attempt in range(1, 4):
                                 target_page.wait_for_timeout(2000)
-                            except Exception:
-                                pass
+                                
+                                current_title = ""
+                                try:
+                                    current_title = target_page.title()
+                                except Exception:
+                                    pass
+
+                                current_content = ""
+                                try:
+                                    current_content = target_page.content()
+                                except Exception:
+                                    pass
+
+                                nick_matched = True
+                                if chosen_nick:
+                                    nick_matched = (chosen_nick.lower() in current_title.lower()) or (chosen_nick.lower() in current_content.lower())
+
+                                if nick_matched:
+                                    info_updated = True
+                                    self.background_log_signal.emit(f"✅ [TikTok] Đã kiểm tra HTML: Thông tin đã đổi thành công! (Tên: '{chosen_nick}')")
+                                    break
+                                else:
+                                    self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_attempt}/3) Kiểm tra HTML chưa thấy thông tin đổi, đang F5 (Reload) lại trang...")
+                                    try:
+                                        target_page.reload(wait_until="domcontentloaded", timeout=25000)
+                                        target_page.wait_for_timeout(3500)
+                                    except Exception as reload_err:
+                                        self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
+
+                            if not info_updated and chosen_nick:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lưu ý: Đã F5 3 lần nhưng chưa thấy tên '{chosen_nick}' xuất hiện trên giao diện. TikTok có thể đang kiểm duyệt hoặc máy chủ đồng bộ chậm.")
 
                             self.background_log_signal.emit("🎉 [TikTok] QUY TRÌNH ĐỔI TÊN & AVATAR ĐÃ HOÀN TẤT THÀNH CÔNG!")
                         except Exception as err:
