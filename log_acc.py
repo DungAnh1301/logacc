@@ -422,7 +422,12 @@ def generate_fake_fingerprint():
     }
 
 
-async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
+class MicrosoftSessionResetException(BaseException):
+    """Ngoại lệ kích hoạt khi Microsoft gặp lỗi 'Something went wrong', yêu cầu tắt hẳn Chrome và mở Chrome mới chạy lại từ đầu."""
+    pass
+
+
+async def _run_single_account_session(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
     await pause_event.wait()
     if isinstance(recovery_list, str):
         recovery_list = [recovery_list] if recovery_list.strip() else []
@@ -744,13 +749,8 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                 # Check nếu hiện màn hình lỗi "Something went wrong." của Microsoft
                 content_lower = content.lower()
                 if "something went wrong" in content_lower or "we can't complete your request right now" in content_lower:
-                    log_signal.emit("🔄 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tự động F5 (Reload) lại trang...")
-                    try:
-                        await page.reload(wait_until="domcontentloaded")
-                        await asyncio.sleep(3)
-                    except Exception as e_reload:
-                        log_signal.emit(f"⚠️ Lỗi khi F5 reload: {e_reload}")
-                    continue
+                    log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tắt Chrome để chạy lại từ đầu...")
+                    raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 3")
 
                 # Check nếu hiện màn hình Passkey (FIDO) / Windows Hello
                 is_passkey_screen = (
@@ -844,17 +844,8 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                                     await asyncio.sleep(1)
 
                                 if hit_sww:
-                                    log_signal.emit(f"🔄 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang F5 (Reload) lại trang để thử lại (lần {email_attempt+1}/2)...")
-                                    try:
-                                        await page.reload(wait_until="domcontentloaded")
-                                        await asyncio.sleep(3)
-                                    except Exception as e_rel:
-                                        log_signal.emit(f"⚠️ Lỗi F5 reload: {e_rel}")
-                                    if email_attempt < 1:
-                                        continue
-                                    else:
-                                        log_signal.emit(f"⚠️ [Microsoft] Email {rec_email} liên tục gặp lỗi 'Something went wrong'. Chuyển sang email tiếp theo trong danh sách...")
-                                        break
+                                    log_signal.emit(f"🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang tắt Chrome để chạy lại từ đầu...")
+                                    raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}")
 
                                 if not otp_appeared:
                                     log_signal.emit(f"⚠️ Email {rec_email} không xuất hiện ô OTP (có thể bị giới hạn hoặc lỗi).")
@@ -951,17 +942,8 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                                     await asyncio.sleep(1)
 
                                 if hit_sww:
-                                    log_signal.emit(f"🔄 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang F5 (Reload) lại trang để thử lại (lần {email_attempt+1}/2)...")
-                                    try:
-                                        await page.reload(wait_until="domcontentloaded")
-                                        await asyncio.sleep(3)
-                                    except Exception as e_rel:
-                                        log_signal.emit(f"⚠️ Lỗi F5 reload: {e_rel}")
-                                    if email_attempt < 1:
-                                        continue
-                                    else:
-                                        log_signal.emit(f"⚠️ [Microsoft] Email {rec_email} liên tục gặp lỗi 'Something went wrong'. Chuyển sang email tiếp theo trong danh sách...")
-                                        break
+                                    log_signal.emit(f"🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang tắt Chrome để chạy lại từ đầu...")
+                                    raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}")
 
                                 if not otp_appeared:
                                     log_signal.emit(f"⚠️ Email {rec_email} không mở được ô nhập OTP.")
@@ -1026,13 +1008,8 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                     # Check nếu bị dính màn hình lỗi "Something went wrong"
                     content_b4 = (await page.content()).lower()
                     if "something went wrong" in content_b4 or "we can't complete your request right now" in content_b4:
-                        log_signal.emit("🔄 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tự động F5 (Reload) lại trang...")
-                        try:
-                            await page.reload(wait_until="domcontentloaded")
-                            await asyncio.sleep(2.5)
-                        except Exception as e_rel:
-                            log_signal.emit(f"⚠️ Lỗi F5 reload: {e_rel}")
-                        continue
+                        log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong' tại Bước 4. Đang tắt Chrome để chạy lại từ đầu...")
+                        raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 4")
 
                     # Bỏ qua màn hình Passkey nếu xuất hiện ở bước này
                     if "fido" in page.url.lower() or "passkey" in content_b4:
@@ -1120,8 +1097,40 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                     error_desc = res_data.get('error_description', 'Lỗi không xác định')
                     log_signal.emit(f"❌ Microsoft từ chối: {error_desc}")
 
+        except MicrosoftSessionResetException:
+            raise
         except Exception as e:
             log_signal.emit(f"⚠️ Lỗi trong trình duyệt: {str(e)[:50]}")
+
+
+async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
+    await pause_event.wait()
+    if isinstance(recovery_list, str):
+        recovery_list = [recovery_list] if recovery_list.strip() else []
+    elif not recovery_list:
+        recovery_list = []
+
+    max_restarts = 3
+    for attempt_round in range(1, max_restarts + 1):
+        if attempt_round > 1:
+            log_signal.emit(f"🔄 [Lần {attempt_round}/{max_restarts}] Đang tắt Chrome cũ và mở Chrome mới để chạy lại từ đầu...")
+            await asyncio.sleep(2)
+
+        try:
+            await _run_single_account_session(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event)
+            return
+        except MicrosoftSessionResetException as ms_err:
+            log_signal.emit(f"🛑 [Reset Chrome] {str(ms_err)}. Đã đóng hoàn toàn trình duyệt Chrome cũ.")
+            if attempt_round < max_restarts:
+                log_signal.emit(f"🔄 Chuẩn bị mở Chrome mới với bộ vân tay mới để đăng nhập lại từ đầu...")
+                await asyncio.sleep(2)
+                continue
+            else:
+                log_signal.emit(f"❌ Đã thử lại {max_restarts} lần với Chrome mới nhưng Microsoft vẫn báo lỗi 'Something went wrong'.")
+                return
+        except Exception as e:
+            log_signal.emit(f"⚠️ Lỗi xử lý tài khoản: {str(e)[:80]}")
+            return
 
 # --- WORKER CHẠY LUỒNG RIÊNG ---
 class AutomationWorker(QThread):
