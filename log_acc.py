@@ -1237,7 +1237,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
             log_signal.emit(f"⚠️ Lỗi trong trình duyệt: {str(e)[:50]}")
 
 
-async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event, recovery_changed_signal=None):
+async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event, recovery_changed_signal=None, worker=None):
     await pause_event.wait()
     if isinstance(recovery_list, str):
         current_recovery_list = [recovery_list] if recovery_list.strip() else []
@@ -1246,20 +1246,30 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
     else:
         current_recovery_list = list(recovery_list)
 
-    max_restarts = max(5, len(current_recovery_list) + 1)
-    for attempt_round in range(1, max_restarts + 1):
+    attempt_round = 1
+    while True:
+        if worker and getattr(worker, "_is_stopped", False):
+            log_signal.emit("🛑 Đã dừng tiến trình theo yêu cầu của người dùng.")
+            return
+
+        await pause_event.wait()
+        
+        current_active = current_recovery_list[0].split('|')[0].strip() if current_recovery_list else "None"
         if attempt_round > 1:
-            log_signal.emit(f"🔄 [Lần thử {attempt_round}/{max_restarts}] Đang tắt Chrome cũ và mở Chrome mới để chạy lại từ đầu...")
+            log_signal.emit(f"🔄 [Vòng lặp lần {attempt_round}] Đang mở Chrome mới với email khôi phục đã ghim: {current_active}...")
             await asyncio.sleep(2)
 
         try:
             await _run_single_account_session(raw_input_str, email, password, current_recovery_list, log_signal, result_signal, pause_event)
             return
         except MicrosoftSessionResetException as ms_err:
+            if worker and getattr(worker, "_is_stopped", False):
+                return
+
             log_signal.emit(f"🛑 [Reset Chrome] {str(ms_err)}. Đã đóng hoàn toàn trình duyệt Chrome cũ.")
             failed_target = ms_err.failed_recovery or (current_recovery_list[0] if current_recovery_list else None)
 
-            # Xoay email khôi phục và LƯU VĨNH VIỄN vào file + cập nhật combobox GUI
+            # Xoay danh sách: Đẩy email lỗi xuống cuối, ghim email tiếp theo lên đầu vĩnh viễn (lưu file + cập nhật GUI)
             new_list = rotate_and_save_recovery_email(
                 failed_recovery=failed_target,
                 log_signal=log_signal,
@@ -1268,13 +1278,11 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
             if new_list:
                 current_recovery_list = new_list
 
-            if attempt_round < max_restarts:
-                log_signal.emit("🔄 Chuẩn bị mở Chrome mới với bộ vân tay mới và email khôi phục mới để đăng nhập lại...")
-                await asyncio.sleep(2)
-                continue
-            else:
-                log_signal.emit(f"❌ Đã thử lại {max_restarts} lần với các email khôi phục khác nhau nhưng Microsoft vẫn báo lỗi.")
-                return
+            next_active = current_recovery_list[0].split('|')[0].strip() if current_recovery_list else ""
+            log_signal.emit(f"📌 [Ghim Email Tiếp Theo] Đã ghim vĩnh viễn: '{next_active}'. Tiếp tục vòng lặp tự động vô tận...")
+            attempt_round += 1
+            await asyncio.sleep(2)
+            continue
         except Exception as e:
             log_signal.emit(f"⚠️ Lỗi xử lý tài khoản: {str(e)[:80]}")
             return
@@ -1298,6 +1306,7 @@ class AutomationWorker(QThread):
         self.recovery_acc = self.recovery_list[0] if self.recovery_list else ""
         self.loop = None
         self.pause_event = None
+        self._is_stopped = False
 
     def run(self):
         email, password, email_idx = extract_email_and_password(self.target_acc)
@@ -1327,7 +1336,8 @@ class AutomationWorker(QThread):
             loop.run_until_complete(process_single_account(
                 self.target_acc, email, password, self.recovery_list, 
                 self.log_signal, self.result_signal, self.pause_event,
-                recovery_changed_signal=self.recovery_changed_signal
+                recovery_changed_signal=self.recovery_changed_signal,
+                worker=self
             ))
         except Exception as e:
             import traceback
@@ -1347,6 +1357,7 @@ class AutomationWorker(QThread):
             self.pause_event.set()
 
     def stop(self):
+        self._is_stopped = True
         if self.pause_event:
             self.pause_event.set() 
         if self.loop and self.loop.is_running():
