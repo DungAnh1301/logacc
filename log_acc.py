@@ -2240,7 +2240,7 @@ class MainWindow(QWidget):
         return result_list
 
     def run_tiktok_profile_update(self, remote_address, chosen_nick, chosen_avatar):
-        """Tự động điều hướng và thao tác đổi avatar & tên nick qua CDP trên profile GPM."""
+        """Tự động hoàn toàn từ Trang chủ -> Vào Profile -> Bấm Edit profile -> Thay Avatar & Tên Nick -> Bấm Lưu qua CDP."""
         if not chosen_nick and not chosen_avatar:
             return
 
@@ -2251,7 +2251,7 @@ class MainWindow(QWidget):
                 from playwright.sync_api import sync_playwright
 
                 with sync_playwright() as p:
-                    # Kết nối trực tiếp vào GPM Chrome đang mở
+                    # 1. Kết nối trực tiếp vào GPM Chrome đang mở
                     browser = p.chromium.connect_over_cdp(remote_address)
                     contexts = browser.contexts
                     if not contexts:
@@ -2261,7 +2261,7 @@ class MainWindow(QWidget):
                     context = contexts[0]
                     pages = context.pages
 
-                    # Tìm tab TikTok đang mở hoặc dùng tab đầu tiên
+                    # Tìm tab TikTok đang mở hoặc lấy tab hiện tại
                     target_page = None
                     for pg in pages:
                         if "tiktok.com" in pg.url:
@@ -2278,35 +2278,133 @@ class MainWindow(QWidget):
                             self.background_log_signal.emit("🌐 [TikTok] Đang mở trang tiktok.com...")
                             target_page.goto("https://www.tiktok.com/", wait_until="domcontentloaded", timeout=30000)
 
-                    self.background_log_signal.emit("🔍 [Bước 1: Trang chủ] Đang định vị nút Profile (Trang cá nhân)...")
-                    target_page.wait_for_timeout(3000)
+                    # 2. BƯỚC 1: TỰ ĐỘNG VÀO TRANG CÁ NHÂN (PROFILE) TỪ TRANG CHỦ
+                    self.background_log_signal.emit(f"🔍 [TikTok] Đang ở URL: {target_page.url}")
+                    target_page.wait_for_timeout(2500)
 
-                    # Định vị nút Profile dựa trên HTML trang chủ người dùng gửi:
-                    # Selector chính: a[data-e2e="nav-profile"] hoặc button[aria-label="Profile"]
-                    profile_btn = target_page.locator('a[data-e2e="nav-profile"]')
-                    if not profile_btn.count():
-                        profile_btn = target_page.locator('button[aria-label="Profile"]')
-                    if not profile_btn.count():
-                        profile_btn = target_page.locator('a[href*="/@"]')
+                    # Kiểm tra xem đã ở sẵn trong Profile chưa (URL có chứa /@)
+                    if "/@" not in target_page.url:
+                        self.background_log_signal.emit("🚀 [Bước 1: Từ Trang chủ] Đang tự động tìm lối vào Profile...")
+                        
+                        # Cách 1: Nút Profile ở thanh điều hướng trái (theo đúng HTML người dùng gửi)
+                        profile_btn = target_page.locator('a[data-e2e="nav-profile"]')
+                        if not profile_btn.count():
+                            profile_btn = target_page.locator('button[aria-label="Profile"]')
+                        if not profile_btn.count():
+                            profile_btn = target_page.locator('a[href*="/@"]')
 
-                    if profile_btn.count() > 0:
-                        profile_href = profile_btn.first.get_attribute("href")
-                        self.background_log_signal.emit(f"👆 [TikTok] Đã tìm thấy nút Profile ({profile_href or 'nav-profile'}). Đang chuyển vào trang cá nhân...")
-                        try:
-                            profile_btn.first.click(timeout=6000)
-                        except Exception:
-                            if profile_href:
-                                full_url = profile_href if profile_href.startswith("http") else f"https://www.tiktok.com{profile_href}"
-                                target_page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
+                        clicked_nav = False
+                        if profile_btn.count() > 0:
+                            profile_href = profile_btn.first.get_attribute("href")
+                            self.background_log_signal.emit(f"👆 [TikTok] Tìm thấy nút Profile bên trái ({profile_href or 'nav-profile'}). Đang chuyển hướng...")
+                            try:
+                                profile_btn.first.click(timeout=5000)
+                                clicked_nav = True
+                            except Exception:
+                                if profile_href:
+                                    full_url = profile_href if profile_href.startswith("http") else f"https://www.tiktok.com{profile_href}"
+                                    target_page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
+                                    clicked_nav = True
+
+                        # Cách 2: Nếu chưa vào được, bấm vào Avatar góc trên bên phải (header-more-menu-icon)
+                        if not clicked_nav and "/@" not in target_page.url:
+                            header_icon = target_page.locator('#header-more-menu-icon, div[data-e2e="profile-icon"]')
+                            if header_icon.count() > 0:
+                                self.background_log_signal.emit("👆 [TikTok] Nhấp vào icon Avatar góc trên bên phải để mở menu...")
+                                try:
+                                    header_icon.first.click(timeout=4000)
+                                    target_page.wait_for_timeout(1000)
+                                    view_prof = target_page.locator('a[href*="/@"], li:has-text("View profile"), div:has-text("View profile")')
+                                    if view_prof.count() > 0:
+                                        view_prof.first.click(timeout=4000)
+                                except Exception as err:
+                                    self.background_log_signal.emit(f"⚠️ [TikTok] Menu avatar: {err}")
+
+                    # Chờ trang Profile tải xong
+                    target_page.wait_for_timeout(3500)
+                    self.background_log_signal.emit(f"📍 [Bước 2: Trang cá nhân] Đã vào: {target_page.url}")
+
+                    # 3. BƯỚC 2: TỰ ĐỘNG BẤM NÚT 'EDIT PROFILE' (SỬA HỒ SƠ)
+                    self.background_log_signal.emit("🔍 [TikTok] Đang tìm nút 'Edit profile' (Sửa hồ sơ)...")
+                    edit_btn = target_page.locator('button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
+                    
+                    # Nếu chưa thấy ngay, cuộn nhẹ trang để nạp
+                    if not edit_btn.count():
+                        target_page.mouse.wheel(0, 100)
+                        target_page.wait_for_timeout(1000)
+                        edit_btn = target_page.locator('button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
+
+                    if edit_btn.count() > 0:
+                        self.background_log_signal.emit("👆 [TikTok] Đã tìm thấy nút 'Edit profile'. Đang mở popup chỉnh sửa...")
+                        edit_btn.first.click(timeout=5000)
                     else:
-                        self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy nút Profile trên thanh điều hướng. Đang thử cuộn tìm...")
+                        self.background_log_signal.emit("⚠️ [TikTok] Không thấy nút 'Edit profile'. Đang thử tìm theo icon sửa...")
+                        icon_edit = target_page.locator('[data-e2e="edit-profile-icon"]')
+                        if icon_edit.count() > 0:
+                            icon_edit.first.click(timeout=5000)
 
-                    target_page.wait_for_timeout(3000)
-                    self.background_log_signal.emit(f"📍 [TikTok] URL hiện tại: {target_page.url}")
-                    self.background_log_signal.emit("⏳ [TikTok] Đã hoàn thành Bước 1 (Vào Profile). Đang chờ HTML Bước 2 (Edit profile) để tự động điền Tên Nick & Avatar.")
+                    target_page.wait_for_timeout(2000)
+
+                    # 4. BƯỚC 3: THAY ĐỔI AVATAR (NẾU CÓ)
+                    if chosen_avatar and os.path.isfile(chosen_avatar):
+                        abs_avatar = os.path.abspath(chosen_avatar)
+                        self.background_log_signal.emit(f"🖼️ [Bước 3: Thay Avatar] Đang tải ảnh: '{os.path.basename(abs_avatar)}'...")
+                        file_input = target_page.locator('input[type="file"]')
+                        if file_input.count() > 0:
+                            try:
+                                file_input.first.set_input_files(abs_avatar, timeout=7000)
+                                self.background_log_signal.emit("✅ [TikTok] Đã chọn file ảnh thành công! Đang chờ popup cắt ảnh...")
+                                target_page.wait_for_timeout(2000)
+
+                                # Nếu có popup cắt ảnh (Crop/Apply)
+                                apply_btn = target_page.locator('button:has-text("Apply"), button:has-text("Áp dụng"), button:has-text("Xác nhận"), button:has-text("Save")')
+                                if apply_btn.count() > 0:
+                                    self.background_log_signal.emit("👆 [TikTok] Bấm nút Apply (Cắt ảnh)...")
+                                    apply_btn.first.click(timeout=5000)
+                                    target_page.wait_for_timeout(1500)
+                            except Exception as err:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload avatar: {err}")
+                        else:
+                            self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô input[type='file'] để nạp avatar.")
+
+                    # 5. BƯỚC 4: THAY ĐỔI TÊN NICK (NẾU CÓ)
+                    if chosen_nick:
+                        self.background_log_signal.emit(f"📝 [Bước 4: Thay Tên Nick] Đang điền tên: '{chosen_nick}'...")
+                        nick_input = target_page.locator('input[name="nickname"], input[placeholder*="Name"], input[placeholder*="Tên"], div[data-e2e="edit-profile-name-input"] input')
+                        if nick_input.count() > 0:
+                            try:
+                                nick_input.first.fill(chosen_nick, timeout=5000)
+                                self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick: '{chosen_nick}'.")
+                                target_page.wait_for_timeout(1000)
+                            except Exception as err:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi điền tên: {err}")
+                        else:
+                            self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick.")
+
+                    # 6. BƯỚC 5: BẤM NÚT LƯU (SAVE)
+                    self.background_log_signal.emit("💾 [Bước 5: Lưu hồ sơ] Đang tìm nút Lưu (Save)...")
+                    save_btn = target_page.locator('button:has-text("Save"), button:has-text("Lưu"), button[data-e2e="edit-profile-save"]')
+                    if save_btn.count() > 0:
+                        try:
+                            save_btn.first.click(timeout=5000)
+                            self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Save lưu thay đổi!")
+                            target_page.wait_for_timeout(2000)
+
+                            # Nếu có modal xác nhận (Confirm tên chỉ được đổi 7 ngày 1 lần)
+                            confirm_modal = target_page.locator('button:has-text("Confirm"), button:has-text("Xác nhận")')
+                            if confirm_modal.count() > 0:
+                                self.background_log_signal.emit("👆 [TikTok] Xác nhận modal đổi tên...")
+                                confirm_modal.first.click(timeout=4000)
+                                target_page.wait_for_timeout(1500)
+
+                            self.background_log_signal.emit("🎉 [TikTok] QUY TRÌNH ĐỔI TÊN & AVATAR ĐÃ HOÀN TẤT THÀNH CÔNG!")
+                        except Exception as err:
+                            self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi bấm Lưu: {err}")
+                    else:
+                        self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy nút Save. Vui lòng kiểm tra lại modal.")
 
             except Exception as ex:
-                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi cập nhật hồ sơ: {str(ex)}")
+                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi quy trình cập nhật hồ sơ: {str(ex)}")
 
         threading.Thread(target=update_thread, daemon=True).start()
 
