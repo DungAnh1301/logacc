@@ -14,7 +14,7 @@ import importlib.util
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QTextEdit, QLineEdit, QLabel, QSizePolicy, QMessageBox,
-                             QComboBox, QDialog, QCheckBox)
+                             QComboBox, QDialog, QCheckBox, QSpinBox, QProgressBar, QTabWidget, QGroupBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QTextCursor
 
@@ -94,7 +94,7 @@ def safe_print(msg):
             pass
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -1247,6 +1247,474 @@ class NicknamesDialog(QDialog):
         QMessageBox.information(self, "Thông báo", f"Đã lưu thành công {len(lines)} tên nick!")
         self.accept()
 
+# ========================================================
+# TỰ ĐỘNG TẠO PROFILE GPM (LOCAL API V2/V3)
+# ========================================================
+def get_gpm_base_url(api_url):
+    """Chuẩn hóa URL GPM về dạng gốc http://127.0.0.1:PORT"""
+    url = (api_url or "http://127.0.0.1:13600").strip().rstrip('/')
+    if url.endswith('/api/v3'):
+        return url[:-7]
+    elif url.endswith('/api/v2'):
+        return url[:-7]
+    elif url.endswith('/v2'):
+        return url[:-3]
+    return url
+
+def fetch_gpm_groups(api_url):
+    """Lấy danh sách các nhóm trên GPM (API v3 /api/v3/groups)"""
+    base_url = get_gpm_base_url(api_url)
+    try:
+        resp = requests.get(f"{base_url}/api/v3/groups", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("success") and "data" in data:
+                groups = [g.get("name") for g in data["data"] if g.get("name")]
+                if groups:
+                    return groups
+    except Exception:
+        pass
+    return ["All", "US", "RU", "MX", "BL", "binance"]
+
+def fetch_all_gpm_profiles(api_url):
+    """Lấy toàn bộ danh sách profile hiện có trên GPM (dict: {profile_name: profile_id})"""
+    base_url = get_gpm_base_url(api_url)
+    profiles_dict = {}
+    
+    # 1. Thử lấy qua API v2 /v2/profiles
+    try:
+        resp = requests.get(f"{base_url}/v2/profiles?per_page=10000", timeout=10)
+        if resp.status_code == 200:
+            items = resp.json()
+            if isinstance(items, list):
+                for it in items:
+                    name = str(it.get("name", "")).strip()
+                    pid = str(it.get("id", "")).strip()
+                    if name:
+                        profiles_dict[name] = pid
+                return profiles_dict
+    except Exception:
+        pass
+
+    # 2. Thử phân trang qua API v3 /api/v3/profiles
+    try:
+        page = 1
+        while True:
+            resp = requests.get(f"{base_url}/api/v3/profiles", params={"page": page, "page_size": 100}, timeout=10)
+            if resp.status_code == 200:
+                payload = resp.json()
+                batch = payload.get("data") or []
+                for it in batch:
+                    name = str(it.get("name", "")).strip()
+                    pid = str(it.get("id", "")).strip()
+                    if name:
+                        profiles_dict[name] = pid
+                total = (payload.get("pagination") or {}).get("total", 0)
+                if not batch or len(batch) < 100 or len(profiles_dict) >= total:
+                    break
+                page += 1
+            else:
+                break
+    except Exception:
+        pass
+    return profiles_dict
+
+def create_single_gpm_profile(api_url, name, group="All", proxy="", canvas=True, font=True, webrtc=True):
+    """Tạo 1 profile mới trên GPM qua API v2 /v2/create"""
+    base_url = get_gpm_base_url(api_url)
+    params = {
+        "name": name.strip(),
+        "group": group.strip() if group else "All",
+        "canvas": "on" if canvas else "off",
+        "font": "on" if font else "off",
+        "webrtc": "on" if webrtc else "off"
+    }
+    if proxy and proxy.strip():
+        params["proxy"] = proxy.strip()
+
+    try:
+        resp = requests.get(f"{base_url}/v2/create", params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") and data.get("profile_id"):
+                return data["profile_id"]
+    except Exception as e:
+        safe_print(f"Lỗi gọi create profile GPM: {e}")
+    return None
+
+class GpmBulkCreateWorker(QThread):
+    progress_signal = pyqtSignal(int, int, str)  # current, total, log_message
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(int, int, int) # created, skipped, failed
+
+    def __init__(self, api_url, profile_names, group="All", proxy="", canvas=True, font=True, webrtc=True, skip_existing=True):
+        super().__init__()
+        self.api_url = api_url
+        self.profile_names = profile_names
+        self.group = group
+        self.proxy = proxy
+        self.canvas = canvas
+        self.font = font
+        self.webrtc = webrtc
+        self.skip_existing = skip_existing
+        self.is_running = True
+
+    def run(self):
+        total = len(self.profile_names)
+        if total == 0:
+            self.log_signal.emit("⚠️ Không có tên profile nào được cung cấp.")
+            self.finished_signal.emit(0, 0, 0)
+            return
+
+        self.log_signal.emit("🔍 Đang kết nối và kiểm tra danh sách profile trên GPM...")
+        existing_profiles = fetch_all_gpm_profiles(self.api_url)
+        self.log_signal.emit(f"📋 GPM hiện có {len(existing_profiles)} profile đang hoạt động.")
+
+        created_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for i, name in enumerate(self.profile_names):
+            if not self.is_running:
+                self.log_signal.emit("🛑 Người dùng đã bấm dừng tiến trình tạo profile.")
+                break
+
+            current_idx = i + 1
+            if self.skip_existing and name in existing_profiles:
+                skipped_count += 1
+                msg = f"[{current_idx}/{total}] ⏩ '{name}' đã có sẵn trên GPM -> Bỏ qua."
+                self.log_signal.emit(msg)
+                self.progress_signal.emit(current_idx, total, msg)
+                continue
+
+            self.log_signal.emit(f"[{current_idx}/{total}] 🔨 Đang tạo profile: {name} (Nhóm: {self.group})...")
+            pid = create_single_gpm_profile(
+                self.api_url,
+                name,
+                group=self.group,
+                proxy=self.proxy,
+                canvas=self.canvas,
+                font=self.font,
+                webrtc=self.webrtc
+            )
+
+            if pid:
+                created_count += 1
+                existing_profiles[name] = pid
+                msg = f"[{current_idx}/{total}] ✅ Tạo thành công '{name}' (ID: {pid[:8]}...)"
+                self.log_signal.emit(msg)
+            else:
+                failed_count += 1
+                msg = f"[{current_idx}/{total}] ❌ Thất bại khi tạo: '{name}'"
+                self.log_signal.emit(msg)
+
+            self.progress_signal.emit(current_idx, total, msg)
+            time.sleep(0.1)
+
+        self.finished_signal.emit(created_count, skipped_count, failed_count)
+
+    def stop(self):
+        self.is_running = False
+
+class GpmBulkCreatorDialog(QDialog):
+    def __init__(self, api_url="http://127.0.0.1:13600/api/v3", default_profile="US-45-1", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("⚡ Tự Động Tạo Profile GPM Hàng Loạt")
+        self.resize(650, 620)
+        self.api_url = api_url
+        self.worker = None
+
+        self.setStyleSheet("""
+            QDialog { background-color: #121212; color: #ffffff; }
+            QLabel { color: #e0e0e0; font-size: 13px; }
+            QLineEdit, QSpinBox, QComboBox { 
+                background-color: #1e1e1e; color: #ffffff; 
+                border: 1px solid #333; border-radius: 4px; padding: 6px; font-size: 13px; 
+            }
+            QComboBox::drop-down { border: none; }
+            QTextEdit { 
+                background-color: #1a1a1a; color: #03dac6; 
+                border: 1px solid #333; border-radius: 4px; font-family: Consolas, monospace; font-size: 12px; 
+            }
+            QProgressBar {
+                border: 1px solid #333; border-radius: 4px; text-align: center; color: white; background-color: #1e1e1e;
+            }
+            QProgressBar::chunk { background-color: #4caf50; border-radius: 3px; }
+            QTabWidget::pane { border: 1px solid #333; background-color: #181818; border-radius: 4px; }
+            QTabBar::tab { background: #262626; color: #bbb; padding: 8px 16px; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; }
+            QTabBar::tab:selected { background: #37474f; color: #ffffff; font-weight: bold; }
+            QPushButton { border-radius: 4px; padding: 8px 16px; font-weight: bold; }
+            QCheckBox { color: #e0e0e0; font-size: 12px; }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        # Header info
+        lbl_head = QLabel("<b>TỰ ĐỘNG TẠO NHIỀU PROFILE GPM LOGIN VỚI FINGERPRINT SẠCH</b><br>"
+                          "<span style='color: #888;'>Hỗ trợ tạo tự động theo dải nhóm (US-45-1 -> US-50-5) hoặc dán danh sách tùy chỉnh. "
+                          "Tự động bật chống Canvas, Font, WebRTC bảo vệ tài khoản.</span>")
+        lbl_head.setWordWrap(True)
+        layout.addWidget(lbl_head)
+
+        # Tabs
+        self.tabs = QTabWidget()
+        
+        # --- TAB 1: Theo dải nhóm & slot ---
+        tab_range = QWidget()
+        tab_range_layout = QVBoxLayout(tab_range)
+
+        # Phân tích prefix mặc định từ default_profile
+        def_prefix = "US-"
+        def_from_group = 45
+        def_to_group = 50
+        def_slots = 5
+        if default_profile and "-" in default_profile:
+            parts = default_profile.split("-")
+            if len(parts) >= 2:
+                def_prefix = f"{parts[0]}-"
+                try:
+                    def_from_group = int(parts[1])
+                    def_to_group = def_from_group + 5
+                except Exception:
+                    pass
+
+        row_prefix = QHBoxLayout()
+        row_prefix.addWidget(QLabel("<b>Tiền tố tên (Prefix):</b>"))
+        self.input_prefix = QLineEdit()
+        self.input_prefix.setText(def_prefix)
+        self.input_prefix.setPlaceholderText("Ví dụ: US- hoặc PK-")
+        row_prefix.addWidget(self.input_prefix)
+        tab_range_layout.addLayout(row_prefix)
+
+        row_group_range = QHBoxLayout()
+        row_group_range.addWidget(QLabel("<b>Từ nhóm số:</b>"))
+        self.spin_from = QSpinBox()
+        self.spin_from.setRange(1, 99999)
+        self.spin_from.setValue(def_from_group)
+        row_group_range.addWidget(self.spin_from)
+
+        row_group_range.addWidget(QLabel("<b>Đến nhóm số:</b>"))
+        self.spin_to = QSpinBox()
+        self.spin_to.setRange(1, 99999)
+        self.spin_to.setValue(def_to_group)
+        row_group_range.addWidget(self.spin_to)
+
+        row_group_range.addWidget(QLabel("<b>Slot mỗi nhóm:</b>"))
+        self.spin_slots = QSpinBox()
+        self.spin_slots.setRange(1, 50)
+        self.spin_slots.setValue(def_slots)
+        row_group_range.addWidget(self.spin_slots)
+        tab_range_layout.addLayout(row_group_range)
+
+        self.lbl_preview = QLabel()
+        self.lbl_preview.setStyleSheet("color: #ffb74d; font-weight: bold; margin-top: 4px;")
+        tab_range_layout.addWidget(self.lbl_preview)
+        self.update_preview_label()
+
+        self.input_prefix.textChanged.connect(self.update_preview_label)
+        self.spin_from.valueChanged.connect(self.update_preview_label)
+        self.spin_to.valueChanged.connect(self.update_preview_label)
+        self.spin_slots.valueChanged.connect(self.update_preview_label)
+
+        self.tabs.addTab(tab_range, "🔢 Theo Dải Số (Nhóm & Slot)")
+
+        # --- TAB 2: Danh sách tên tùy chỉnh ---
+        tab_custom = QWidget()
+        tab_custom_layout = QVBoxLayout(tab_custom)
+        tab_custom_layout.addWidget(QLabel("<b>Dán danh sách tên profile cần tạo (mỗi dòng 1 tên):</b>"))
+        self.text_custom_names = QTextEdit()
+        self.text_custom_names.setPlaceholderText("Ví dụ:\nUS-45-1\nUS-45-2\nPK-10-1\n...")
+        tab_custom_layout.addWidget(self.text_custom_names)
+        self.tabs.addTab(tab_custom, "📝 Danh Sách Tên Tự Do")
+
+        layout.addWidget(self.tabs)
+
+        # Cấu hình Fingerprint & Nhóm GPM
+        grp_settings = QGroupBox("Cấu hình Profile & Anti-Detect")
+        grp_settings.setStyleSheet("QGroupBox { color: #80cbc4; font-weight: bold; border: 1px solid #333; margin-top: 6px; padding-top: 10px; }")
+        grp_layout = QVBoxLayout(grp_settings)
+
+        row_gpm_opt = QHBoxLayout()
+        row_gpm_opt.addWidget(QLabel("<b>Nhóm GPM (Group):</b>"))
+        self.combo_group = QComboBox()
+        self.combo_group.setEditable(True)
+        self.load_groups()
+        row_gpm_opt.addWidget(self.combo_group, stretch=1)
+
+        btn_refresh_groups = QPushButton("🔄")
+        btn_refresh_groups.setToolTip("Lấy lại danh sách nhóm từ GPM")
+        btn_refresh_groups.setStyleSheet("background-color: #37474f; color: white; padding: 6px 10px;")
+        btn_refresh_groups.clicked.connect(self.load_groups)
+        row_gpm_opt.addWidget(btn_refresh_groups)
+
+        row_gpm_opt.addWidget(QLabel("<b>Proxy:</b>"))
+        self.input_proxy = QLineEdit()
+        self.input_proxy.setPlaceholderText("Để trống nếu không dùng")
+        row_gpm_opt.addWidget(self.input_proxy, stretch=1)
+        grp_layout.addLayout(row_gpm_opt)
+
+        row_checks = QHBoxLayout()
+        self.cb_canvas = QCheckBox("Fake Canvas")
+        self.cb_canvas.setChecked(True)
+        self.cb_font = QCheckBox("Fake Font")
+        self.cb_font.setChecked(True)
+        self.cb_webrtc = QCheckBox("WebRTC Protection")
+        self.cb_webrtc.setChecked(True)
+        self.cb_skip_existing = QCheckBox("Bỏ qua nếu đã tồn tại")
+        self.cb_skip_existing.setChecked(True)
+
+        row_checks.addWidget(self.cb_canvas)
+        row_checks.addWidget(self.cb_font)
+        row_checks.addWidget(self.cb_webrtc)
+        row_checks.addWidget(self.cb_skip_existing)
+        grp_layout.addLayout(row_checks)
+
+        layout.addWidget(grp_settings)
+
+        # Tiến trình & Log
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        layout.addWidget(self.progress_bar)
+
+        self.log_console = QTextEdit()
+        self.log_console.setReadOnly(True)
+        self.log_console.setMaximumHeight(150)
+        layout.addWidget(self.log_console)
+
+        # Nút hành động
+        row_actions = QHBoxLayout()
+        self.btn_start = QPushButton("🚀 Bắt Đầu Tạo Profiles")
+        self.btn_start.setStyleSheet("background-color: #2e7d32; color: white; font-size: 13px;")
+        self.btn_start.clicked.connect(self.start_creation)
+
+        self.btn_stop = QPushButton("⏹ Dừng Lại")
+        self.btn_stop.setStyleSheet("background-color: #c62828; color: white; font-size: 13px;")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self.stop_creation)
+
+        self.btn_close = QPushButton("Đóng")
+        self.btn_close.setStyleSheet("background-color: #424242; color: white; font-size: 13px;")
+        self.btn_close.clicked.connect(self.close)
+
+        row_actions.addWidget(self.btn_start, stretch=2)
+        row_actions.addWidget(self.btn_stop, stretch=1)
+        row_actions.addWidget(self.btn_close, stretch=1)
+        layout.addLayout(row_actions)
+
+    def update_preview_label(self):
+        prefix = self.input_prefix.text().strip()
+        f_group = self.spin_from.value()
+        t_group = self.spin_to.value()
+        slots = self.spin_slots.value()
+        if f_group > t_group:
+            self.lbl_preview.setText("⚠️ Số nhóm bắt đầu không được lớn hơn số nhóm kết thúc!")
+            return
+        total_groups = (t_group - f_group + 1)
+        total_profiles = total_groups * slots
+        start_name = f"{prefix}{f_group}-1"
+        end_name = f"{prefix}{t_group}-{slots}"
+        self.lbl_preview.setText(f"📊 Dự kiến tạo: {total_profiles} profiles ({start_name} -> {end_name})")
+
+    def load_groups(self):
+        cur_text = self.combo_group.currentText().strip()
+        self.combo_group.clear()
+        groups = fetch_gpm_groups(self.api_url)
+        for g in groups:
+            self.combo_group.addItem(g)
+        if cur_text:
+            idx = self.combo_group.findText(cur_text)
+            if idx >= 0:
+                self.combo_group.setCurrentIndex(idx)
+            else:
+                self.combo_group.setEditText(cur_text)
+        else:
+            idx = self.combo_group.findText("US")
+            if idx >= 0:
+                self.combo_group.setCurrentIndex(idx)
+
+    def append_log(self, text):
+        self.log_console.append(text)
+        self.log_console.moveCursor(QTextCursor.MoveOperation.End)
+
+    def start_creation(self):
+        names_to_create = []
+        if self.tabs.currentIndex() == 0:
+            prefix = self.input_prefix.text().strip()
+            f_group = self.spin_from.value()
+            t_group = self.spin_to.value()
+            slots = self.spin_slots.value()
+            if f_group > t_group:
+                QMessageBox.warning(self, "Lỗi dải số", "Nhóm bắt đầu phải nhỏ hơn hoặc bằng nhóm kết thúc!")
+                return
+            for g in range(f_group, t_group + 1):
+                for s in range(1, slots + 1):
+                    names_to_create.append(f"{prefix}{g}-{s}")
+        else:
+            raw = self.text_custom_names.toPlainText().strip()
+            for line in raw.splitlines():
+                c = line.strip()
+                if c and not c.startswith("#"):
+                    names_to_create.append(c)
+
+        if not names_to_create:
+            QMessageBox.warning(self, "Thông báo", "Vui lòng nhập hoặc cấu hình ít nhất 1 tên profile!")
+            return
+
+        group = self.combo_group.currentText().strip() or "All"
+        proxy = self.input_proxy.text().strip()
+        canvas = self.cb_canvas.isChecked()
+        font = self.cb_font.isChecked()
+        webrtc = self.cb_webrtc.isChecked()
+        skip_existing = self.cb_skip_existing.isChecked()
+
+        self.progress_bar.setRange(0, len(names_to_create))
+        self.progress_bar.setValue(0)
+        self.log_console.clear()
+        self.append_log(f"🚀 Bắt đầu tạo {len(names_to_create)} profile trên GPM (Nhóm: {group})...")
+
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+
+        self.worker = GpmBulkCreateWorker(
+            api_url=self.api_url,
+            profile_names=names_to_create,
+            group=group,
+            proxy=proxy,
+            canvas=canvas,
+            font=font,
+            webrtc=webrtc,
+            skip_existing=skip_existing
+        )
+        self.worker.log_signal.connect(self.append_log)
+        self.worker.progress_signal.connect(self.on_worker_progress)
+        self.worker.finished_signal.connect(self.on_worker_finished)
+        self.worker.start()
+
+    def on_worker_progress(self, current, total, msg):
+        self.progress_bar.setValue(current)
+
+    def on_worker_finished(self, created, skipped, failed):
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.append_log("=" * 45)
+        self.append_log(f"🎉 HOÀN TẤT: Tạo mới: {created} | Bỏ qua: {skipped} | Thất bại: {failed}")
+        QMessageBox.information(
+            self,
+            "Hoàn tất tạo Profile",
+            f"Đã hoàn thành tiến trình!\n\n"
+            f"• Tạo mới thành công: {created}\n"
+            f"• Bỏ qua (đã có sẵn): {skipped}\n"
+            f"• Thất bại: {failed}"
+        )
+
+    def stop_creation(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.btn_stop.setEnabled(False)
+            self.append_log("⏳ Đang dừng tiến trình, vui lòng đợi xong profile hiện tại...")
+
+
 # --- GIAO DIỆN CHÍNH (GUI) ---
 class MainWindow(QWidget):
     background_log_signal = pyqtSignal(str)
@@ -1325,8 +1793,15 @@ class MainWindow(QWidget):
         self.gpm_profile_input.setPlaceholderText("Ví dụ: US-45-1")
         self.gpm_profile_input.setText("US-45-1")
         self.gpm_profile_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 8px; border-radius: 4px; color: #ffcc80;")
+        
+        self.btn_bulk_create_gpm = QPushButton("⚡ Tạo Profile Auto")
+        self.btn_bulk_create_gpm.setStyleSheet("padding: 8px 14px; background-color: #7b1fa2; color: white; border-radius: 4px; font-weight: bold;")
+        self.btn_bulk_create_gpm.setToolTip("Mở công cụ tự động tạo profile GPM hàng loạt không cần bấm tay!")
+        self.btn_bulk_create_gpm.clicked.connect(self.open_bulk_create_gpm_dialog)
+
         gpm_layout.addWidget(QLabel("<b>Profile GPM:</b>"))
-        gpm_layout.addWidget(self.gpm_profile_input)
+        gpm_layout.addWidget(self.gpm_profile_input, stretch=1)
+        gpm_layout.addWidget(self.btn_bulk_create_gpm)
         main_layout.addLayout(gpm_layout)
 
         # Ô 4: Local API GPM có thể thay đổi trực tiếp trên GUI
@@ -1499,6 +1974,12 @@ class MainWindow(QWidget):
             nicks = load_nicknames()
             self.log_output.append(f"📝 Đã cập nhật danh sách tên nick ({len(nicks)} tên).")
 
+    def open_bulk_create_gpm_dialog(self):
+        current_profile = self.gpm_profile_input.text().strip()
+        api_url = self.gpm_api_input.text().strip()
+        dlg = GpmBulkCreatorDialog(api_url=api_url, default_profile=current_profile, parent=self)
+        dlg.exec()
+
     def open_avatars_folder(self):
         os.makedirs(AVATARS_DIR, exist_ok=True)
         try:
@@ -1620,7 +2101,19 @@ class MainWindow(QWidget):
                 None
             )
             if not target:
-                raise RuntimeError(f"Không tìm thấy profile có tên chính xác: {profile_name}")
+                self.background_log_signal.emit(f"⚡ Profile '{profile_name}' chưa có trên GPM -> Đang tự động gọi API tạo mới...")
+                # Tự đoán group từ prefix tên (vd US-45-1 -> US, RU-10-1 -> RU, PK-1-1 -> PK)
+                guess_group = "All"
+                if "-" in profile_name:
+                    p = profile_name.split("-")[0].strip()
+                    if p:
+                        guess_group = p
+                new_pid = create_single_gpm_profile(api_url, profile_name, group=guess_group, canvas=True, font=True, webrtc=True)
+                if new_pid:
+                    self.background_log_signal.emit(f"✅ Đã tự động tạo profile '{profile_name}' (ID: {new_pid[:8]}...) thành công!")
+                    target = {"id": new_pid, "name": profile_name}
+                else:
+                    raise RuntimeError(f"Không tìm thấy và không thể tự động tạo profile: {profile_name}")
 
             response = requests.get(
                 f"{api_url}/profiles/start/{target['id']}", timeout=30
