@@ -2382,13 +2382,13 @@ class MainWindow(QWidget):
 
                     # 3. BƯỚC 2: TỰ ĐỘNG BẤM NÚT 'EDIT PROFILE' (SỬA HỒ SƠ)
                     self.background_log_signal.emit("🔍 [TikTok] Đang tìm nút 'Edit profile' (Sửa hồ sơ)...")
-                    edit_btn = target_page.locator('button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
+                    edit_btn = target_page.locator('[data-e2e="edit-profile-entrance"], button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
                     
                     # Nếu chưa thấy ngay, cuộn nhẹ trang để nạp
                     if not edit_btn.count():
                         target_page.mouse.wheel(0, 100)
                         target_page.wait_for_timeout(1000)
-                        edit_btn = target_page.locator('button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
+                        edit_btn = target_page.locator('[data-e2e="edit-profile-entrance"], button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
 
                     if edit_btn.count() > 0:
                         self.background_log_signal.emit("👆 [TikTok] Đã tìm thấy nút 'Edit profile'. Đang mở popup chỉnh sửa...")
@@ -2426,9 +2426,10 @@ class MainWindow(QWidget):
                     # 5. BƯỚC 4: THAY ĐỔI TÊN NICK (NẾU CÓ)
                     if chosen_nick:
                         self.background_log_signal.emit(f"📝 [Bước 4: Thay Tên Nick] Đang điền tên: '{chosen_nick}'...")
-                        nick_input = target_page.locator('input[name="nickname"], input[placeholder*="Name"], input[placeholder*="Tên"], div[data-e2e="edit-profile-name-input"] input')
+                        nick_input = target_page.locator('input[placeholder="Name"], input[placeholder="Tên"], input[name="nickname"], div[data-e2e="edit-profile-name-input"] input')
                         if nick_input.count() > 0:
                             try:
+                                nick_input.first.click(timeout=3000)
                                 nick_input.first.fill(chosen_nick, timeout=5000)
                                 self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick: '{chosen_nick}'.")
                                 target_page.wait_for_timeout(1000)
@@ -2439,7 +2440,7 @@ class MainWindow(QWidget):
 
                     # 6. BƯỚC 5: BẤM NÚT LƯU (SAVE)
                     self.background_log_signal.emit("💾 [Bước 5: Lưu hồ sơ] Đang tìm nút Lưu (Save)...")
-                    save_btn = target_page.locator('button:has-text("Save"), button:has-text("Lưu"), button[data-e2e="edit-profile-save"]')
+                    save_btn = target_page.locator('button[data-e2e="edit-profile-save"], button:has-text("Save"), button:has-text("Lưu")')
                     if save_btn.count() > 0:
                         try:
                             save_btn.first.click(timeout=5000)
