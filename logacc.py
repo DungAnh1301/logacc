@@ -2687,34 +2687,66 @@ class MainWindow(QWidget):
                         if chosen_nick:
                             self.background_log_signal.emit(f"📝 [Bước 4: Thay Tên Nick] Đang điền tên: '{chosen_nick}'...")
                             
-                            # Tự động khắc phục nếu ô Username từng bị dính ký tự lỗi/khoảng trắng từ trước
+                            # Tự động phát hiện và định vị chính xác ô Name bằng CẤU TRÚC HTML THUẦN TÚY (Độc lập với mọi ngôn ngữ: Anh, Việt, Ả Rập, Tây Ban Nha...)
+                            found_name_input = False
                             try:
-                                target_page.evaluate('''() => {
-                                    const inputs = Array.from(document.querySelectorAll('input:not([type="file"])'));
-                                    const userInp = inputs.find(i => {
-                                        const ph = (i.getAttribute('placeholder') || '').trim().toLowerCase();
-                                        return ph.includes('user') || ph.includes('người dùng');
-                                    });
-                                    if (userInp && userInp.value && userInp.value.includes(' ')) {
-                                        const cleanVal = userInp.value.replace(/\\s+/g, '');
-                                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                                        if (setter) setter.call(userInp, cleanVal);
-                                        else userInp.value = cleanVal;
-                                        userInp.dispatchEvent(new Event('input', { bubbles: true }));
-                                        userInp.dispatchEvent(new Event('change', { bubbles: true }));
+                                found_name_input = target_page.evaluate('''() => {
+                                    const dialog = document.querySelector('div[role="dialog"]') || document.body;
+                                    
+                                    // 1. Dò theo thuộc tính chuẩn data-e2e của TikTok (không bị đổi theo ngôn ngữ)
+                                    let inp = dialog.querySelector('[data-e2e="edit-profile-name-input"] input, input[data-e2e="edit-profile-name-input"], [data-e2e*="name-input"] input');
+                                    
+                                    // 2. Dò theo cấu trúc cây DOM trong dialog (loại trừ file, hidden, search)
+                                    if (!inp) {
+                                        const textInputs = Array.from(dialog.querySelectorAll('input:not([type="file"]):not([type="hidden"]):not([type="search"])'));
+                                        if (textInputs.length === 1) {
+                                            inp = textInputs[0];
+                                        } else if (textInputs.length > 1) {
+                                            // Loại trừ ô Username (hàng chứa ký tự @ hoặc link tiktok.com)
+                                            inp = textInputs.find(i => {
+                                                const row = i.closest('div[class*="DivItem"], div[class*="ItemContainer"]') || i.parentElement;
+                                                const txt = row ? row.innerText : '';
+                                                return !txt.includes('@') && !txt.includes('tiktok.com');
+                                            });
+                                            // Hoặc tìm ô có hiển thị đếm số ký tự /30 hoặc maxlength=30 (Name tối đa 30 ký tự trên TikTok)
+                                            if (!inp) {
+                                                inp = textInputs.find(i => {
+                                                    const row = i.closest('div[class*="DivItem"], div[class*="ItemContainer"]') || i.parentElement;
+                                                    const txt = row ? row.innerText : '';
+                                                    return txt.includes('/30') || txt.includes('/ 30') || i.getAttribute('maxlength') === '30';
+                                                });
+                                            }
+                                            // Fallback vị trí DOM: Trong popup TikTok, ô Name luôn xếp dưới ô Username
+                                            if (!inp) {
+                                                inp = textInputs[textInputs.length - 1];
+                                            }
+                                        }
                                     }
+
+                                    if (inp) {
+                                        inp.setAttribute('data-target-nick-input', 'true');
+                                        return true;
+                                    }
+                                    return false;
                                 }''')
-                            except Exception:
-                                pass
+                            except Exception as eval_err:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi quét HTML ô Name: {eval_err}")
 
-                            # CHỈ tìm chính xác ô Name (Tên hiển thị), tuyệt đối KHÔNG chọn ô Username (Tên người dùng)
-                            nick_input = target_page.locator('input[placeholder="Name"], input[placeholder="Tên"], div[data-e2e="edit-profile-name-input"] input')
-                            if nick_input.count() == 0:
-                                nick_input = target_page.locator('div[role="dialog"] input:not([type="file"]):not([placeholder*="User"]):not([placeholder*="user"]):not([placeholder*="người dùng"])')
+                            # Locator Playwright liên kết trực tiếp vào thẻ HTML đã được nhận diện
+                            nick_elem = None
+                            if found_name_input:
+                                target_locator = target_page.locator('input[data-target-nick-input="true"]')
+                                if target_locator.count() > 0:
+                                    nick_elem = target_locator.first
 
-                            if nick_input.count() > 0:
+                            if not nick_elem:
+                                # Dự phòng thêm các selector theo cấu trúc HTML chuẩn
+                                fallback_locator = target_page.locator('div[role="dialog"] [data-e2e="edit-profile-name-input"] input, div[role="dialog"] input[class*="InputText"]:not([type="file"])')
+                                if fallback_locator.count() > 0:
+                                    nick_elem = fallback_locator.last
+
+                            if nick_elem:
                                 try:
-                                    nick_elem = nick_input.first
                                     # Chờ popup cắt ảnh biến mất hoàn toàn
                                     try:
                                         target_page.locator('.react-transform-component').wait_for(state="detached", timeout=3000)
@@ -2730,19 +2762,9 @@ class MainWindow(QWidget):
                                     nick_elem.fill(chosen_nick)
                                     target_page.wait_for_timeout(300)
 
-                                    # Kích hoạt sự kiện React native chính xác trên ô Name (loại trừ Username)
+                                    # Đồng bộ giá trị vào React native state và dọn dẹp attribute tạm
                                     target_page.evaluate('''(val) => {
-                                        const inputs = Array.from(document.querySelectorAll('input:not([type="file"])'));
-                                        let inp = inputs.find(i => {
-                                            const ph = (i.getAttribute('placeholder') || '').trim().toLowerCase();
-                                            return ph === 'name' || ph === 'tên' || ph === 'nickname';
-                                        });
-                                        if (!inp) {
-                                            inp = inputs.find(i => {
-                                                const ph = (i.getAttribute('placeholder') || '').trim().toLowerCase();
-                                                return !ph.includes('user') && !ph.includes('người dùng');
-                                            });
-                                        }
+                                        const inp = document.querySelector('input[data-target-nick-input="true"]') || document.querySelector('div[role="dialog"] [data-e2e="edit-profile-name-input"] input');
                                         if (inp) {
                                             inp.focus();
                                             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -2753,15 +2775,16 @@ class MainWindow(QWidget):
                                             }
                                             inp.dispatchEvent(new Event('input', { bubbles: true }));
                                             inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                            inp.removeAttribute('data-target-nick-input');
                                         }
                                     }''', chosen_nick)
                                     target_page.wait_for_timeout(500)
 
-                                    self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick vào ô Name: '{chosen_nick}'.")
+                                    self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick thành công theo HTML: '{chosen_nick}'.")
                                 except Exception as err:
                                     self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi điền tên: {err}")
                             else:
-                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick (Name).")
+                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick qua cấu trúc HTML.")
 
                         # 6. BƯỚC 5: BẤM NÚT LƯU (SAVE)
                         self.background_log_signal.emit("💾 [Bước 5: Lưu hồ sơ] Đang chờ nút Save sẵn sàng...")
