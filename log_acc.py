@@ -2601,300 +2601,301 @@ class MainWindow(QWidget):
 
                     # Biến cờ đánh dấu thành công
                     final_success = False
-                    max_rounds = 2
 
-                    for round_num in range(1, max_rounds + 1):
-                        if round_num > 1:
-                            self.background_log_signal.emit(f"🔄 [TikTok] (Thử lại vòng {round_num}/{max_rounds}) Đang làm mới trang và chạy lại các bước đổi Tên & Avatar...")
-                            try:
-                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
-                                target_page.wait_for_timeout(3500)
-                            except Exception:
-                                pass
-
-                        # 3. BƯỚC 2: TỰ ĐỘNG BẤM NÚT 'EDIT PROFILE' (SỬA HỒ SƠ)
-                        self.background_log_signal.emit("🔍 [TikTok] Đang tìm nút 'Edit profile' (Sửa hồ sơ)...")
+                    # Hàm hỗ trợ mở popup Edit profile
+                    def open_edit_dialog(desc="chỉnh sửa"):
+                        self.background_log_signal.emit(f"🔍 [TikTok] Đang tìm nút 'Edit profile' để {desc}...")
                         edit_btn = target_page.locator('[data-e2e="edit-profile-entrance"], button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
-                        
-                        # Nếu chưa thấy ngay, cuộn nhẹ trang để nạp
                         if not edit_btn.count():
                             target_page.mouse.wheel(0, 100)
                             target_page.wait_for_timeout(1000)
                             edit_btn = target_page.locator('[data-e2e="edit-profile-entrance"], button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
 
                         if edit_btn.count() > 0:
-                            self.background_log_signal.emit("👆 [TikTok] Đã tìm thấy nút 'Edit profile'. Đang mở popup chỉnh sửa...")
+                            self.background_log_signal.emit(f"👆 [TikTok] Đã tìm thấy nút 'Edit profile'. Đang mở popup để {desc}...")
                             edit_btn.first.click(timeout=5000)
                         else:
                             self.background_log_signal.emit("⚠️ [TikTok] Không thấy nút 'Edit profile'. Đang thử tìm theo icon sửa...")
                             icon_edit = target_page.locator('[data-e2e="edit-profile-icon"]')
                             if icon_edit.count() > 0:
                                 icon_edit.first.click(timeout=5000)
-
                         target_page.wait_for_timeout(2000)
 
-                        # 4. BƯỚC 3: THAY ĐỔI AVATAR (NẾU CÓ)
-                        if chosen_avatar and os.path.isfile(chosen_avatar):
-                            abs_avatar = os.path.abspath(chosen_avatar)
-                            self.background_log_signal.emit(f"🖼️ [Bước 3: Thay Avatar] Đang tải ảnh: '{os.path.basename(abs_avatar)}'...")
-                            file_input = target_page.locator('input[type="file"]')
-                            if file_input.count() > 0:
+                    # Hàm hỗ trợ bấm nút Save và xử lý confirm modal
+                    def click_save_dialog(save_action_name="Lưu"):
+                        self.background_log_signal.emit(f"💾 [TikTok] Đang chờ nút Save sẵn sàng ({save_action_name})...")
+                        save_btn = target_page.locator('button[data-e2e="edit-profile-save"], button.e1lwtbhx5, button:has-text("Save"), button:has-text("Lưu")')
+                        if save_btn.count() > 0:
+                            save_ready = False
+                            for _ in range(8):
                                 try:
-                                    file_input.first.set_input_files(abs_avatar, timeout=7000)
-                                    self.background_log_signal.emit("✅ [TikTok] Đã chọn file ảnh thành công! Đang chờ popup cắt ảnh...")
-                                    target_page.wait_for_timeout(2500)
+                                    if not save_btn.first.is_disabled():
+                                        save_ready = True
+                                        break
+                                except Exception:
+                                    pass
+                                target_page.wait_for_timeout(1000)
 
-                                    # Tìm và bấm nút Apply của modal cắt ảnh
-                                    self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh)...")
-                                    apply_btn = target_page.locator('div[role="dialog"] button:has-text("Apply"), div[role="dialog"] button:has-text("Áp dụng"), button:has-text("Apply"), button:has-text("Áp dụng")')
-                                    
-                                    clicked_apply = False
-                                    for _ in range(5):
-                                        if apply_btn.count() > 0:
-                                            try:
-                                                apply_btn.first.click(force=True, timeout=3000)
-                                                clicked_apply = True
-                                                self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh.")
-                                                break
-                                            except Exception:
-                                                pass
-                                        target_page.wait_for_timeout(1000)
+                            if save_ready:
+                                save_btn.first.click(force=True, timeout=5000)
+                                self.background_log_signal.emit(f"✅ [TikTok] Đã bấm nút Save ({save_action_name}) thành công!")
+                            else:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Nút Save ({save_action_name}) vẫn đang disabled, click cưỡng bức (force=True)...")
+                                save_btn.first.click(force=True, timeout=4000)
 
-                                    if not clicked_apply:
-                                        try:
-                                            target_page.evaluate('''() => {
-                                                const btns = Array.from(document.querySelectorAll('button'));
-                                                for (const b of btns) {
-                                                    const t = (b.innerText || '').trim().toLowerCase();
-                                                    if (t === 'apply' || t === 'áp dụng') { b.click(); return; }
-                                                }
-                                            }''')
-                                        except Exception:
-                                            pass
+                            target_page.wait_for_timeout(2000)
 
-                                    # Chờ popup cắt ảnh đóng lại hoàn toàn để không che khuất form
+                            # Chờ và bấm modal xác nhận nếu có (Confirm)
+                            confirm_modal = target_page.locator('div[role="dialog"] button:has-text("Confirm"), div[role="dialog"] button:has-text("Xác nhận"), div[role="dialog"] button.TUXButton--primary, div[role="dialog"] button:has-text("Change"), div[role="dialog"] button:has-text("Đổi"), button:has-text("Confirm"), button:has-text("Xác nhận")')
+                            for _ in range(5):
+                                if confirm_modal.count() > 0:
                                     try:
-                                        target_page.locator('.react-transform-component').wait_for(state="detached", timeout=6000)
+                                        self.background_log_signal.emit("👆 [TikTok] Đã phát hiện modal xác nhận. Đang bấm Confirm...")
+                                        confirm_modal.first.click(force=True, timeout=3000)
+                                        break
                                     except Exception:
                                         pass
-                                    target_page.wait_for_timeout(2000)
-                                except Exception as err:
-                                    self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload/cắt avatar: {err}")
-                            else:
-                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô input[type='file'] để nạp avatar.")
+                                target_page.wait_for_timeout(1000)
 
-                        # 5. BƯỚC 4: THAY ĐỔI TÊN NICK (NẾU CÓ)
-                        if chosen_nick:
-                            self.background_log_signal.emit(f"📝 [Bước 4: Thay Tên Nick] Đang điền tên: '{chosen_nick}'...")
-                            
-                            # Tự động phát hiện và định vị chính xác ô Name bằng CẤU TRÚC HTML THUẦN TÚY (Độc lập với mọi ngôn ngữ: Anh, Việt, Ả Rập, Tây Ban Nha...)
-                            found_name_input = False
                             try:
-                                found_name_input = target_page.evaluate('''() => {
-                                    const dialog = document.querySelector('div[role="dialog"]') || document.body;
-                                    
-                                    // 1. Dò theo thuộc tính chuẩn data-e2e của TikTok (không bị đổi theo ngôn ngữ)
-                                    let inp = dialog.querySelector('[data-e2e="edit-profile-name-input"] input, input[data-e2e="edit-profile-name-input"], [data-e2e*="name-input"] input');
-                                    
-                                    // 2. Dò theo cấu trúc cây DOM trong dialog (loại trừ file, hidden, search)
-                                    if (!inp) {
-                                        const textInputs = Array.from(dialog.querySelectorAll('input:not([type="file"]):not([type="hidden"]):not([type="search"])'));
-                                        if (textInputs.length === 1) {
-                                            inp = textInputs[0];
-                                        } else if (textInputs.length > 1) {
-                                            // Loại trừ ô Username (hàng chứa ký tự @ hoặc link tiktok.com)
-                                            inp = textInputs.find(i => {
-                                                const row = i.closest('div[class*="DivItem"], div[class*="ItemContainer"]') || i.parentElement;
-                                                const txt = row ? row.innerText : '';
-                                                return !txt.includes('@') && !txt.includes('tiktok.com');
-                                            });
-                                            // Hoặc tìm ô có hiển thị đếm số ký tự /30 hoặc maxlength=30 (Name tối đa 30 ký tự trên TikTok)
-                                            if (!inp) {
-                                                inp = textInputs.find(i => {
-                                                    const row = i.closest('div[class*="DivItem"], div[class*="ItemContainer"]') || i.parentElement;
-                                                    const txt = row ? row.innerText : '';
-                                                    return txt.includes('/30') || txt.includes('/ 30') || i.getAttribute('maxlength') === '30';
-                                                });
-                                            }
-                                            // Fallback vị trí DOM: Trong popup TikTok, ô Name luôn xếp dưới ô Username
-                                            if (!inp) {
-                                                inp = textInputs[textInputs.length - 1];
+                                target_page.evaluate('''() => {
+                                    const dialogs = document.querySelectorAll('div[role="dialog"]');
+                                    for (const d of dialogs) {
+                                        const btns = d.querySelectorAll('button');
+                                        for (const b of btns) {
+                                            const txt = (b.innerText || '').trim().toLowerCase();
+                                            if (txt === 'confirm' || txt === 'xác nhận' || txt === 'change' || txt === 'đổi') {
+                                                b.click();
+                                                return true;
                                             }
                                         }
-                                    }
-
-                                    if (inp) {
-                                        inp.setAttribute('data-target-nick-input', 'true');
-                                        return true;
                                     }
                                     return false;
                                 }''')
-                            except Exception as eval_err:
-                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi quét HTML ô Name: {eval_err}")
+                            except Exception:
+                                pass
 
-                            # Locator Playwright liên kết trực tiếp vào thẻ HTML đã được nhận diện
-                            nick_elem = None
-                            if found_name_input:
-                                target_locator = target_page.locator('input[data-target-nick-input="true"]')
-                                if target_locator.count() > 0:
-                                    nick_elem = target_locator.first
-
-                            if not nick_elem:
-                                # Dự phòng thêm các selector theo cấu trúc HTML chuẩn
-                                fallback_locator = target_page.locator('div[role="dialog"] [data-e2e="edit-profile-name-input"] input, div[role="dialog"] input[class*="InputText"]:not([type="file"])')
-                                if fallback_locator.count() > 0:
-                                    nick_elem = fallback_locator.last
-
-                            if nick_elem:
-                                try:
-                                    # Chờ popup cắt ảnh biến mất hoàn toàn
-                                    try:
-                                        target_page.locator('.react-transform-component').wait_for(state="detached", timeout=3000)
-                                    except Exception:
-                                        pass
-
-                                    nick_elem.click(force=True, timeout=3000)
-                                    target_page.wait_for_timeout(300)
-
-                                    # Xóa và gõ tên mới vào đúng ô Name
-                                    nick_elem.fill("")
-                                    target_page.wait_for_timeout(200)
-                                    nick_elem.fill(chosen_nick)
-                                    target_page.wait_for_timeout(300)
-
-                                    # Đồng bộ giá trị vào React native state và dọn dẹp attribute tạm
-                                    target_page.evaluate('''(val) => {
-                                        const inp = document.querySelector('input[data-target-nick-input="true"]') || document.querySelector('div[role="dialog"] [data-e2e="edit-profile-name-input"] input');
-                                        if (inp) {
-                                            inp.focus();
-                                            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                                            if (setter) {
-                                                setter.call(inp, val);
-                                            } else {
-                                                inp.value = val;
-                                            }
-                                            inp.dispatchEvent(new Event('input', { bubbles: true }));
-                                            inp.dispatchEvent(new Event('change', { bubbles: true }));
-                                            inp.removeAttribute('data-target-nick-input');
-                                        }
-                                    }''', chosen_nick)
-                                    target_page.wait_for_timeout(500)
-
-                                    self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick thành công theo HTML: '{chosen_nick}'.")
-                                except Exception as err:
-                                    self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi điền tên: {err}")
-                            else:
-                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick qua cấu trúc HTML.")
-
-                        # 6. BƯỚC 5: BẤM NÚT LƯU (SAVE)
-                        self.background_log_signal.emit("💾 [Bước 5: Lưu hồ sơ] Đang chờ nút Save sẵn sàng...")
-                        save_btn = target_page.locator('button[data-e2e="edit-profile-save"], button.e1lwtbhx5, button:has-text("Save"), button:has-text("Lưu")')
-                        if save_btn.count() > 0:
+                            self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi TikTok lưu dữ liệu ({save_action_name}) lên máy chủ...")
+                            target_page.wait_for_timeout(4000)
                             try:
-                                # Đợi nút Save được kích hoạt (enabled) - tối đa 8 giây
-                                save_ready = False
-                                for _ in range(8):
-                                    try:
-                                        if not save_btn.first.is_disabled():
-                                            save_ready = True
-                                            break
-                                    except Exception:
-                                        pass
-                                    target_page.wait_for_timeout(1000)
+                                target_page.locator('div[role="dialog"]').wait_for(state="detached", timeout=5000)
+                            except Exception:
+                                pass
+                            target_page.wait_for_timeout(1500)
+                            return True
+                        else:
+                            self.background_log_signal.emit(f"⚠️ [TikTok] Không tìm thấy nút Save để {save_action_name}.")
+                            return False
 
-                                if save_ready:
-                                    save_btn.first.click(force=True, timeout=5000)
-                                    self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Save lưu thay đổi!")
-                                else:
-                                    self.background_log_signal.emit("⚠️ [TikTok] Nút Save vẫn đang disabled, click cưỡng bức (force=True)...")
-                                    save_btn.first.click(force=True, timeout=4000)
+                    # =========================================================================
+                    # PHẦN 1: THAY ĐỔI & LƯU RIÊNG AVATAR (NẾU CÓ)
+                    # =========================================================================
+                    if chosen_avatar and os.path.isfile(chosen_avatar):
+                        abs_avatar = os.path.abspath(chosen_avatar)
+                        self.background_log_signal.emit(f"🖼️ [Phần 1: Thay Avatar] Bắt đầu tải ảnh đại diện: '{os.path.basename(abs_avatar)}'...")
+                        
+                        open_edit_dialog("thay đổi Avatar")
+                        
+                        file_input = target_page.locator('input[type="file"]')
+                        if file_input.count() > 0:
+                            try:
+                                file_input.first.set_input_files(abs_avatar, timeout=7000)
+                                self.background_log_signal.emit("✅ [TikTok] Đã chọn file ảnh thành công! Đang chờ popup cắt ảnh...")
+                                target_page.wait_for_timeout(2500)
 
-                                target_page.wait_for_timeout(2000)
-
-                                # Chờ và bấm modal xác nhận nếu có (Confirm tên chỉ được đổi 7 ngày 1 lần)
-                                self.background_log_signal.emit("🔍 [TikTok] Kiểm tra modal xác nhận đổi tên (Confirm)...")
-                                confirm_modal = target_page.locator('div[role="dialog"] button:has-text("Confirm"), div[role="dialog"] button:has-text("Xác nhận"), div[role="dialog"] button.TUXButton--primary, div[role="dialog"] button:has-text("Change"), div[role="dialog"] button:has-text("Đổi"), button:has-text("Confirm"), button:has-text("Xác nhận")')
+                                # Tìm và bấm nút Apply của modal cắt ảnh
+                                self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh)...")
+                                apply_btn = target_page.locator('div[role="dialog"] button:has-text("Apply"), div[role="dialog"] button:has-text("Áp dụng"), button:has-text("Apply"), button:has-text("Áp dụng")')
                                 
-                                clicked_confirm = False
+                                clicked_apply = False
                                 for _ in range(5):
-                                    if confirm_modal.count() > 0:
+                                    if apply_btn.count() > 0:
                                         try:
-                                            self.background_log_signal.emit("👆 [TikTok] Đã phát hiện modal xác nhận. Đang bấm Confirm...")
-                                            confirm_modal.first.click(force=True, timeout=3000)
-                                            clicked_confirm = True
+                                            apply_btn.first.click(force=True, timeout=3000)
+                                            clicked_apply = True
+                                            self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh.")
                                             break
                                         except Exception:
                                             pass
                                     target_page.wait_for_timeout(1000)
 
-                                if not clicked_confirm:
+                                if not clicked_apply:
                                     try:
                                         target_page.evaluate('''() => {
-                                            const dialogs = document.querySelectorAll('div[role="dialog"]');
-                                            for (const d of dialogs) {
-                                                const btns = d.querySelectorAll('button');
-                                                for (const b of btns) {
-                                                    const txt = (b.innerText || '').trim().toLowerCase();
-                                                    if (txt === 'confirm' || txt === 'xác nhận' || txt === 'change' || txt === 'đổi') {
-                                                        b.click();
-                                                        return true;
-                                                    }
-                                                }
+                                            const btns = Array.from(document.querySelectorAll('button'));
+                                            for (const b of btns) {
+                                                const t = (b.innerText || '').trim().toLowerCase();
+                                                if (t === 'apply' || t === 'áp dụng') { b.click(); return; }
                                             }
-                                            return false;
                                         }''')
                                     except Exception:
                                         pass
 
-                                # Chờ máy chủ TikTok xử lý lưu
-                                self.background_log_signal.emit("⏳ [TikTok] Đang đợi TikTok lưu thông tin lên máy chủ...")
-                                target_page.wait_for_timeout(4000)
+                                # Chờ popup cắt ảnh đóng lại hoàn toàn để không che khuất form
+                                try:
+                                    target_page.locator('.react-transform-component').wait_for(state="detached", timeout=6000)
+                                except Exception:
+                                    pass
+                                target_page.wait_for_timeout(2000)
 
-                                # 7. BƯỚC 6: KIỂM TRA LẠI HTML VÀ TỰ ĐỘNG F5 (RELOAD) NẾU CHƯA THAY ĐỔI
-                                self.background_log_signal.emit("🔍 [Bước 6: Kiểm tra HTML] Đang kiểm tra xem thông tin hồ sơ đã cập nhật chưa...")
-                                
-                                info_updated = False
-                                for check_attempt in range(1, 4):
-                                    target_page.wait_for_timeout(2000)
-                                    
-                                    current_title = ""
-                                    try:
-                                        current_title = target_page.title()
-                                    except Exception:
-                                        pass
+                                # BẤM LƯU RIÊNG AVATAR!
+                                self.background_log_signal.emit("💾 [TikTok] Đang lưu riêng Avatar...")
+                                click_save_dialog("Avatar")
+                                self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất lưu riêng Avatar!")
 
-                                    current_content = ""
-                                    try:
-                                        current_content = target_page.content()
-                                    except Exception:
-                                        pass
-
-                                    nick_matched = True
-                                    if chosen_nick:
-                                        nick_matched = (chosen_nick.lower() in current_title.lower()) or (chosen_nick.lower() in current_content.lower())
-
-                                    if nick_matched:
-                                        info_updated = True
-                                        self.background_log_signal.emit(f"✅ [TikTok] Đã kiểm tra HTML: Thông tin đã đổi thành công! (Tên: '{chosen_nick}')")
-                                        break
-                                    else:
-                                        self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_attempt}/3) Kiểm tra HTML chưa thấy thông tin đổi, đang F5 (Reload) lại trang...")
-                                        try:
-                                            target_page.reload(wait_until="domcontentloaded", timeout=25000)
-                                            target_page.wait_for_timeout(3500)
-                                        except Exception as reload_err:
-                                            self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
-
-                                if info_updated:
-                                    final_success = True
-                                    break
-                                else:
-                                    if round_num < max_rounds:
-                                        self.background_log_signal.emit(f"⚠️ [TikTok] (Vòng {round_num}/{max_rounds}) Chưa cập nhật được tên '{chosen_nick}'. Chuẩn bị tự động chạy lại...")
                             except Exception as err:
-                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi bấm Lưu: {err}")
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload/cắt avatar: {err}")
                         else:
-                            self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy nút Save. Vui lòng kiểm tra lại modal.")
+                            self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô input[type='file'] để nạp avatar.")
+                    
+                    target_page.wait_for_timeout(2000)
+
+                    # =========================================================================
+                    # PHẦN 2: THAY ĐỔI & LƯU RIÊNG TÊN NICK (NẾU CÓ)
+                    # =========================================================================
+                    if chosen_nick:
+                        self.background_log_signal.emit(f"📝 [Phần 2: Thay Tên Nick] Bắt đầu điền tên mới: '{chosen_nick}'...")
+                        
+                        open_edit_dialog("thay đổi Tên Nick")
+                        
+                        # Tự động phát hiện và định vị chính xác ô Name bằng CẤU TRÚC HTML THUẦN TÚY (Độc lập với mọi ngôn ngữ: Anh, Việt, Ả Rập, Tây Ban Nha...)
+                        found_name_input = False
+                        try:
+                            found_name_input = target_page.evaluate('''() => {
+                                const dialog = document.querySelector('div[role="dialog"]') || document.body;
+                                
+                                // 1. Dò theo thuộc tính chuẩn data-e2e của TikTok (không bị đổi theo ngôn ngữ)
+                                let inp = dialog.querySelector('[data-e2e="edit-profile-name-input"] input, input[data-e2e="edit-profile-name-input"], [data-e2e*="name-input"] input');
+                                
+                                // 2. Dò theo cấu trúc cây DOM trong dialog (loại trừ file, hidden, search)
+                                if (!inp) {
+                                    const textInputs = Array.from(dialog.querySelectorAll('input:not([type="file"]):not([type="hidden"]):not([type="search"])'));
+                                    if (textInputs.length === 1) {
+                                        inp = textInputs[0];
+                                    } else if (textInputs.length > 1) {
+                                        // Loại trừ ô Username (hàng chứa ký tự @ hoặc link tiktok.com)
+                                        inp = textInputs.find(i => {
+                                            const row = i.closest('div[class*="DivItem"], div[class*="ItemContainer"]') || i.parentElement;
+                                            const txt = row ? row.innerText : '';
+                                            return !txt.includes('@') && !txt.includes('tiktok.com');
+                                        });
+                                        // Hoặc tìm ô có hiển thị đếm số ký tự /30 hoặc maxlength=30 (Name tối đa 30 ký tự trên TikTok)
+                                        if (!inp) {
+                                            inp = textInputs.find(i => {
+                                                const row = i.closest('div[class*="DivItem"], div[class*="ItemContainer"]') || i.parentElement;
+                                                const txt = row ? row.innerText : '';
+                                                return txt.includes('/30') || txt.includes('/ 30') || i.getAttribute('maxlength') === '30';
+                                            });
+                                        }
+                                        // Fallback vị trí DOM: Trong popup TikTok, ô Name luôn xếp dưới ô Username
+                                        if (!inp) {
+                                            inp = textInputs[textInputs.length - 1];
+                                        }
+                                    }
+                                }
+
+                                if (inp) {
+                                    inp.setAttribute('data-target-nick-input', 'true');
+                                    return true;
+                                }
+                                return false;
+                            }''')
+                        except Exception as eval_err:
+                            self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi quét HTML ô Name: {eval_err}")
+
+                        # Locator Playwright liên kết trực tiếp vào thẻ HTML đã được nhận diện
+                        nick_elem = None
+                        if found_name_input:
+                            target_locator = target_page.locator('input[data-target-nick-input="true"]')
+                            if target_locator.count() > 0:
+                                nick_elem = target_locator.first
+
+                        if not nick_elem:
+                            # Dự phòng thêm các selector theo cấu trúc HTML chuẩn
+                            fallback_locator = target_page.locator('div[role="dialog"] [data-e2e="edit-profile-name-input"] input, div[role="dialog"] input[class*="InputText"]:not([type="file"])')
+                            if fallback_locator.count() > 0:
+                                nick_elem = fallback_locator.last
+
+                        if nick_elem:
+                            try:
+                                nick_elem.click(force=True, timeout=3000)
+                                target_page.wait_for_timeout(300)
+
+                                # Xóa và gõ tên mới vào đúng ô Name
+                                nick_elem.fill("")
+                                target_page.wait_for_timeout(200)
+                                nick_elem.fill(chosen_nick)
+                                target_page.wait_for_timeout(300)
+
+                                # Đồng bộ giá trị vào React native state và dọn dẹp attribute tạm
+                                target_page.evaluate('''(val) => {
+                                    const inp = document.querySelector('input[data-target-nick-input="true"]') || document.querySelector('div[role="dialog"] [data-e2e="edit-profile-name-input"] input');
+                                    if (inp) {
+                                        inp.focus();
+                                        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                                        if (setter) {
+                                            setter.call(inp, val);
+                                        } else {
+                                            inp.value = val;
+                                        }
+                                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                        inp.removeAttribute('data-target-nick-input');
+                                    }
+                                }''', chosen_nick)
+                                target_page.wait_for_timeout(500)
+
+                                self.background_log_signal.emit(f"✅ [TikTok] Đã điền tên nick thành công theo HTML: '{chosen_nick}'.")
+                                
+                                # BẤM LƯU RIÊNG TÊN NICK!
+                                self.background_log_signal.emit("💾 [TikTok] Đang lưu riêng Tên Nick...")
+                                click_save_dialog("Tên Nick")
+                                self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất lưu riêng Tên Nick!")
+
+                            except Exception as err:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi điền và lưu tên: {err}")
+                        else:
+                            self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô nhập tên nick qua cấu trúc HTML.")
+
+                    # =========================================================================
+                    # PHẦN 3: KIỂM TRA LẠI HTML VÀ TỰ ĐỘNG F5 (RELOAD) NẾU CHƯA THAY ĐỔI
+                    # =========================================================================
+                    self.background_log_signal.emit("🔍 [Bước Kiểm tra HTML] Đang kiểm tra xem thông tin hồ sơ đã cập nhật chưa...")
+                    
+                    info_updated = False
+                    for check_attempt in range(1, 4):
+                        target_page.wait_for_timeout(2000)
+                        
+                        current_title = ""
+                        try:
+                            current_title = target_page.title()
+                        except Exception:
+                            pass
+
+                        current_content = ""
+                        try:
+                            current_content = target_page.content()
+                        except Exception:
+                            pass
+
+                        nick_matched = True
+                        if chosen_nick:
+                            nick_matched = (chosen_nick.lower() in current_title.lower()) or (chosen_nick.lower() in current_content.lower())
+
+                        if nick_matched:
+                            info_updated = True
+                            self.background_log_signal.emit(f"✅ [TikTok] Đã kiểm tra HTML: Thông tin đã đổi thành công! (Tên: '{chosen_nick}')")
+                            break
+                        else:
+                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_attempt}/3) Kiểm tra HTML chưa thấy tên '{chosen_nick}', đang F5 (Reload) lại trang...")
+                            try:
+                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
+                                target_page.wait_for_timeout(3500)
+                            except Exception as reload_err:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
+
+                    if info_updated:
+                        final_success = True
 
                     # KẾT THÚC TIẾN TRÌNH: CHỈ ĐÓNG CHROME KHI THỰC SỰ THÀNH CÔNG, LỖI THÌ GIỮ NGUYÊN
                     if final_success:
@@ -2914,7 +2915,7 @@ class MainWindow(QWidget):
                             except Exception:
                                 pass
                     else:
-                        self.background_log_signal.emit(f"❌ [TikTok] ĐỔI THÔNG TIN THẤT BẠI: Đã chạy {max_rounds} vòng thử nhưng tên '{chosen_nick}' chưa được lưu.")
+                        self.background_log_signal.emit(f"❌ [TikTok] ĐỔI THÔNG TIN THẤT BẠI: Tên '{chosen_nick}' chưa được cập nhật sau 3 lần kiểm tra HTML.")
                         self.background_log_signal.emit("⚠️ [TikTok] GIỮ NGUYÊN TRÌNH DUYỆT CHROME để bạn kiểm tra, KHÔNG đóng Chrome!")
 
             except Exception as ex:
