@@ -733,13 +733,24 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
             # BƯỚC 3: CHECK KHUNG BẢO MẬT / THÊM EMAIL KHÔI PHỤC & OTP / PASSKEY
             # ==========================================
             log_signal.emit(f"🛡️ [Bước 3] Kiểm tra khung bảo mật / email khôi phục...")
-            for _ in range(25):
+            for _ in range(35):
                 await pause_event.wait()
                 await asyncio.sleep(1)
                 try:
                     content = await page.content()
                 except:
                     break
+
+                # Check nếu hiện màn hình lỗi "Something went wrong." của Microsoft
+                content_lower = content.lower()
+                if "something went wrong" in content_lower or "we can't complete your request right now" in content_lower:
+                    log_signal.emit("🔄 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tự động F5 (Reload) lại trang...")
+                    try:
+                        await page.reload(wait_until="domcontentloaded")
+                        await asyncio.sleep(3)
+                    except Exception as e_reload:
+                        log_signal.emit(f"⚠️ Lỗi khi F5 reload: {e_reload}")
+                    continue
 
                 # Check nếu hiện màn hình Passkey (FIDO) / Windows Hello
                 is_passkey_screen = (
@@ -785,75 +796,109 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                             continue
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
-                        try:
-                            # Ở trang Help protect, phải bấm Add email để mở ô nhập.
-                            if not await new_recovery_input.is_visible():
-                                add_email_button = page.get_by_role(
-                                    "button", name=re.compile(r"^Add email$", re.I)
-                                )
-                                if await add_email_button.count() > 0:
-                                    await add_email_button.click(timeout=10000)
-                                    await page.wait_for_selector(
-                                        "#floatingLabelInput10",
-                                        state="visible",
-                                        timeout=15000
+                        
+                        # Cho phép thử lại email này tối đa 2 lần nếu bị dính lỗi Something went wrong
+                        for email_attempt in range(2):
+                            try:
+                                # Nếu trang đang ở màn hình Something went wrong, F5 reload trước
+                                cur_c = (await page.content()).lower()
+                                if "something went wrong" in cur_c or "we can't complete your request right now" in cur_c:
+                                    log_signal.emit("🔄 [Microsoft] Màn hình đang bị 'Something went wrong', đang F5 (Reload) lại trang...")
+                                    await page.reload(wait_until="domcontentloaded")
+                                    await asyncio.sleep(3)
+
+                                # Ở trang Help protect, phải bấm Add email để mở ô nhập.
+                                if not await new_recovery_input.is_visible():
+                                    add_email_button = page.get_by_role(
+                                        "button", name=re.compile(r"^Add email$", re.I)
                                     )
+                                    if await add_email_button.count() > 0:
+                                        await add_email_button.click(timeout=10000)
+                                        await page.wait_for_selector(
+                                            "#floatingLabelInput10",
+                                            state="visible",
+                                            timeout=15000
+                                        )
 
-                            await new_recovery_input.fill("")
-                            await new_recovery_input.fill(rec_email)
+                                await new_recovery_input.fill("")
+                                await new_recovery_input.fill(rec_email)
 
-                            await new_primary_button.wait_for(state="visible", timeout=10000)
-                            await new_primary_button.click(timeout=10000)
+                                await new_primary_button.wait_for(state="visible", timeout=10000)
+                                await new_primary_button.click(timeout=10000)
 
-                            # Chờ xem có xuất hiện ô OTP không
-                            otp_appeared = False
-                            for _ in range(8):
-                                await pause_event.wait()
-                                if await page.is_visible("#codeEntry-0"):
-                                    otp_appeared = True
+                                # Chờ xem có xuất hiện ô OTP không hoặc bị dính Something went wrong
+                                otp_appeared = False
+                                hit_sww = False
+                                for _ in range(8):
+                                    await pause_event.wait()
+                                    if await page.is_visible("#codeEntry-0"):
+                                        otp_appeared = True
+                                        break
+                                    try:
+                                        check_c = (await page.content()).lower()
+                                        if "something went wrong" in check_c or "we can't complete your request right now" in check_c:
+                                            hit_sww = True
+                                            break
+                                    except:
+                                        pass
+                                    await asyncio.sleep(1)
+
+                                if hit_sww:
+                                    log_signal.emit(f"🔄 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang F5 (Reload) lại trang để thử lại (lần {email_attempt+1}/2)...")
+                                    try:
+                                        await page.reload(wait_until="domcontentloaded")
+                                        await asyncio.sleep(3)
+                                    except Exception as e_rel:
+                                        log_signal.emit(f"⚠️ Lỗi F5 reload: {e_rel}")
+                                    if email_attempt < 1:
+                                        continue
+                                    else:
+                                        log_signal.emit(f"⚠️ [Microsoft] Email {rec_email} liên tục gặp lỗi 'Something went wrong'. Chuyển sang email tiếp theo trong danh sách...")
+                                        break
+
+                                if not otp_appeared:
+                                    log_signal.emit(f"⚠️ Email {rec_email} không xuất hiện ô OTP (có thể bị giới hạn hoặc lỗi).")
+                                    if rec_idx + 1 < len(recovery_list):
+                                        log_signal.emit("🔄 Đang thử quay lại để đổi sang email khôi phục tiếp theo...")
+                                        btn_back = page.locator("button:has-text('Back'), #idBtn_Back, button[aria-label='Back']")
+                                        if await btn_back.count() > 0:
+                                            await btn_back.first.click(timeout=3000)
+                                            await asyncio.sleep(2)
                                     break
-                                await asyncio.sleep(1)
 
-                            if not otp_appeared:
-                                log_signal.emit(f"⚠️ Email {rec_email} không xuất hiện ô OTP (có thể bị giới hạn hoặc lỗi).")
-                                if rec_idx + 1 < len(recovery_list):
-                                    log_signal.emit("🔄 Đang thử quay lại để đổi sang email khôi phục tiếp theo...")
-                                    btn_back = page.locator("button:has-text('Back'), #idBtn_Back, button[aria-label='Back']")
-                                    if await btn_back.count() > 0:
-                                        await btn_back.first.click(timeout=3000)
-                                        await asyncio.sleep(2)
-                                continue
+                                log_signal.emit(f"⏳ Đang đợi OTP cho email {rec_email}...")
+                                otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
+                                if otp_code:
+                                    otp_digits = str(otp_code).strip()
+                                    otp_inputs = page.locator("input[id^='codeEntry-']")
+                                    input_count = await otp_inputs.count()
+                                    if len(otp_digits) != input_count:
+                                        raise RuntimeError(
+                                            f"OTP có {len(otp_digits)} số nhưng trang yêu cầu {input_count} số"
+                                        )
 
-                            log_signal.emit(f"⏳ Đang đợi OTP cho email {rec_email}...")
-                            otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
-                            if otp_code:
-                                otp_digits = str(otp_code).strip()
-                                otp_inputs = page.locator("input[id^='codeEntry-']")
-                                input_count = await otp_inputs.count()
-                                if len(otp_digits) != input_count:
-                                    raise RuntimeError(
-                                        f"OTP có {len(otp_digits)} số nhưng trang yêu cầu {input_count} số"
-                                    )
+                                    for index, digit in enumerate(otp_digits):
+                                        await page.fill(f"#codeEntry-{index}", digit)
 
-                                for index, digit in enumerate(otp_digits):
-                                    await page.fill(f"#codeEntry-{index}", digit)
-
-                                log_signal.emit(f"✅ Đã điền OTP vào 6 ô từ email {rec_email} thành công.")
-                                await asyncio.sleep(4)
-                                recovery_success = True
+                                    log_signal.emit(f"✅ Đã điền OTP vào 6 ô từ email {rec_email} thành công.")
+                                    await asyncio.sleep(4)
+                                    recovery_success = True
+                                    break
+                                else:
+                                    log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
+                                    if rec_idx + 1 < len(recovery_list):
+                                        log_signal.emit("🔄 Đang tự động đổi sang email khôi phục tiếp theo trong list...")
+                                        btn_back = page.locator("button:has-text('Back'), #idBtn_Back, a:has-text('Back'), a:has-text('Cancel')")
+                                        if await btn_back.count() > 0:
+                                            await btn_back.first.click(timeout=3000)
+                                            await asyncio.sleep(2)
+                                    break
+                            except Exception as e:
+                                log_signal.emit(f"⚠️ Lỗi xử lý email {rec_email}: {str(e)}")
                                 break
-                            else:
-                                log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
-                                if rec_idx + 1 < len(recovery_list):
-                                    log_signal.emit("🔄 Đang tự động đổi sang email khôi phục tiếp theo trong list...")
-                                    btn_back = page.locator("button:has-text('Back'), #idBtn_Back, a:has-text('Back'), a:has-text('Cancel')")
-                                    if await btn_back.count() > 0:
-                                        await btn_back.first.click(timeout=3000)
-                                        await asyncio.sleep(2)
-                        except Exception as e:
-                            log_signal.emit(f"⚠️ Lỗi xử lý email {rec_email}: {str(e)}")
-                            if rec_idx + 1 < len(recovery_list):
-                                continue
+
+                        if recovery_success:
+                            break
 
                     if not recovery_success:
                         log_signal.emit("⚠️ Đã thử hết danh sách email khôi phục.")
@@ -873,54 +918,85 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                             continue
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
-                        try:
-                            await page.wait_for_selector("#EmailAddress", state="visible", timeout=10000)
-                            await page.fill("#EmailAddress", "")
-                            await page.fill("#EmailAddress", rec_email)
-                            await asyncio.sleep(1)
-                            await page.click("#iNext")
-                            await asyncio.sleep(3)
-                            
-                            # Chờ ô nhập OTP
-                            otp_appeared = False
-                            for _ in range(8):
-                                await pause_event.wait()
-                                if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
-                                    otp_appeared = True
-                                    break
+                        for email_attempt in range(2):
+                            try:
+                                cur_c = (await page.content()).lower()
+                                if "something went wrong" in cur_c or "we can't complete your request right now" in cur_c:
+                                    log_signal.emit("🔄 [Microsoft] Đang ở trang 'Something went wrong', F5 reload lại...")
+                                    await page.reload(wait_until="domcontentloaded")
+                                    await asyncio.sleep(3)
+
+                                await page.wait_for_selector("#EmailAddress", state="visible", timeout=10000)
+                                await page.fill("#EmailAddress", "")
+                                await page.fill("#EmailAddress", rec_email)
                                 await asyncio.sleep(1)
-
-                            if not otp_appeared:
-                                log_signal.emit(f"⚠️ Email {rec_email} không mở được ô nhập OTP.")
-                                if rec_idx + 1 < len(recovery_list):
-                                    btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
-                                    if await btn_back.count() > 0:
-                                        await btn_back.first.click(timeout=3000)
-                                        await asyncio.sleep(2)
-                                continue
-
-                            # Bắt mã OTP
-                            log_signal.emit(f"⏳ Đang đợi mã OTP từ email: {rec_email}...")
-                            otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
-                            if otp_code:
-                                await page.fill("input[type='tel'], input[name='otc'], input[id*='otc']", otp_code)
-                                await page.click("#iNext, #idSIButton9")
+                                await page.click("#iNext")
                                 await asyncio.sleep(3)
-                                recovery_success = True
-                                log_signal.emit(f"✅ Đã điền OTP thành công cho email: {rec_email}")
+                                
+                                # Chờ ô nhập OTP hoặc dính Something went wrong
+                                otp_appeared = False
+                                hit_sww = False
+                                for _ in range(8):
+                                    await pause_event.wait()
+                                    if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
+                                        otp_appeared = True
+                                        break
+                                    try:
+                                        check_c = (await page.content()).lower()
+                                        if "something went wrong" in check_c or "we can't complete your request right now" in check_c:
+                                            hit_sww = True
+                                            break
+                                    except:
+                                        pass
+                                    await asyncio.sleep(1)
+
+                                if hit_sww:
+                                    log_signal.emit(f"🔄 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi email {rec_email}. Đang F5 (Reload) lại trang để thử lại (lần {email_attempt+1}/2)...")
+                                    try:
+                                        await page.reload(wait_until="domcontentloaded")
+                                        await asyncio.sleep(3)
+                                    except Exception as e_rel:
+                                        log_signal.emit(f"⚠️ Lỗi F5 reload: {e_rel}")
+                                    if email_attempt < 1:
+                                        continue
+                                    else:
+                                        log_signal.emit(f"⚠️ [Microsoft] Email {rec_email} liên tục gặp lỗi 'Something went wrong'. Chuyển sang email tiếp theo trong danh sách...")
+                                        break
+
+                                if not otp_appeared:
+                                    log_signal.emit(f"⚠️ Email {rec_email} không mở được ô nhập OTP.")
+                                    if rec_idx + 1 < len(recovery_list):
+                                        btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
+                                        if await btn_back.count() > 0:
+                                            await btn_back.first.click(timeout=3000)
+                                            await asyncio.sleep(2)
+                                    break
+
+                                # Bắt mã OTP
+                                log_signal.emit(f"⏳ Đang đợi mã OTP từ email: {rec_email}...")
+                                otp_code = get_outlook_otp_via_api(cur_recovery, log_signal)
+                                if otp_code:
+                                    await page.fill("input[type='tel'], input[name='otc'], input[id*='otc']", otp_code)
+                                    await page.click("#iNext, #idSIButton9")
+                                    await asyncio.sleep(3)
+                                    recovery_success = True
+                                    log_signal.emit(f"✅ Đã điền OTP thành công cho email: {rec_email}")
+                                    break
+                                else:
+                                    log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
+                                    if rec_idx + 1 < len(recovery_list):
+                                        log_signal.emit("🔄 Đang thử quay lại để đổi email khôi phục tiếp theo...")
+                                        btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
+                                        if await btn_back.count() > 0:
+                                            await btn_back.first.click(timeout=3000)
+                                            await asyncio.sleep(2)
+                                    break
+                            except Exception as e:
+                                log_signal.emit(f"⚠️ Lỗi thử email {rec_email}: {str(e)}")
                                 break
-                            else:
-                                log_signal.emit(f"❌ Không lấy được OTP cho email: {rec_email}.")
-                                if rec_idx + 1 < len(recovery_list):
-                                    log_signal.emit("🔄 Đang thử quay lại để đổi email khôi phục tiếp theo...")
-                                    btn_back = page.locator("#idBtn_Back, button:has-text('Back')")
-                                    if await btn_back.count() > 0:
-                                        await btn_back.first.click(timeout=3000)
-                                        await asyncio.sleep(2)
-                        except Exception as e:
-                            log_signal.emit(f"⚠️ Lỗi thử email {rec_email}: {str(e)}")
-                            if rec_idx + 1 < len(recovery_list):
-                                continue
+
+                        if recovery_success:
+                            break
 
                     if not recovery_success:
                         log_signal.emit("⚠️ Đã thử hết danh sách email khôi phục.")
@@ -947,8 +1023,19 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
                     await page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
                     await asyncio.sleep(0.5)
 
+                    # Check nếu bị dính màn hình lỗi "Something went wrong"
+                    content_b4 = (await page.content()).lower()
+                    if "something went wrong" in content_b4 or "we can't complete your request right now" in content_b4:
+                        log_signal.emit("🔄 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tự động F5 (Reload) lại trang...")
+                        try:
+                            await page.reload(wait_until="domcontentloaded")
+                            await asyncio.sleep(2.5)
+                        except Exception as e_rel:
+                            log_signal.emit(f"⚠️ Lỗi F5 reload: {e_rel}")
+                        continue
+
                     # Bỏ qua màn hình Passkey nếu xuất hiện ở bước này
-                    if "fido" in page.url.lower() or "passkey" in (await page.content()).lower():
+                    if "fido" in page.url.lower() or "passkey" in content_b4:
                         btn_cancel = page.locator("button:has-text('Cancel'), input[value='Cancel'], #idBtn_Back, button:has-text('Hủy'), a:has-text('Cancel')")
                         if await btn_cancel.count() > 0:
                             await btn_cancel.first.click(timeout=3000)
