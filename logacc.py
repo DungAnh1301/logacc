@@ -1319,27 +1319,58 @@ def fetch_all_gpm_profiles(api_url):
         pass
     return profiles_dict
 
-def create_single_gpm_profile(api_url, name, group="All", proxy="", canvas=True, font=True, webrtc=True):
-    """Tạo 1 profile mới trên GPM qua API v2 /v2/create"""
+def create_single_gpm_profile(api_url, name, group="All", proxy="", canvas=True, font=True, webrtc=True, client_rect=True, webgl=True, audio=True):
+    """Tạo 1 profile mới trên GPM với đầy đủ 4 chế độ Noise (Canvas, ClientRect, WebGL, Audio) đều ON"""
     base_url = get_gpm_base_url(api_url)
-    params = {
-        "name": name.strip(),
-        "group": group.strip() if group else "All",
-        "canvas": "on" if canvas else "off",
-        "font": "on" if font else "off",
-        "webrtc": "on" if webrtc else "off"
-    }
-    if proxy and proxy.strip():
-        params["proxy"] = proxy.strip()
 
+    # 1. Thử tạo qua API v3 (/api/v3/profiles/create) để bật đầy đủ cả 4 chế độ Noise ON
     try:
+        v3_url = f"{base_url}/api/v3/profiles/create"
+        payload = {
+            "profile_name": name.strip(),
+            "group_name": group.strip() if group else "All",
+            "is_noise_canvas": bool(canvas),
+            "is_noise_client_rect": bool(client_rect),
+            "is_noise_webgl": bool(webgl),
+            "is_noise_audio_context": bool(audio),
+            "is_masked_font": bool(font),
+            "is_masked_webgl_data": True,
+            "webrtc_mode": 2 if webrtc else 1
+        }
+        if proxy and proxy.strip():
+            payload["raw_proxy"] = proxy.strip()
+
+        resp = requests.post(v3_url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("success") and data.get("data") and data["data"].get("id"):
+                return data["data"]["id"]
+    except Exception as e:
+        safe_print(f"Lỗi tạo profile GPM v3: {e}")
+
+    # 2. Dự phòng qua API v2 nếu v3 không phản hồi
+    try:
+        params = {
+            "name": name.strip(),
+            "group": group.strip() if group else "All",
+            "canvas": "on" if canvas else "off",
+            "font": "on" if font else "off",
+            "webrtc": "on" if webrtc else "off",
+            "is_noise_canvas": "on" if canvas else "off",
+            "is_noise_client_rect": "on" if client_rect else "off",
+            "is_noise_webgl": "on" if webgl else "off",
+            "is_noise_audio_context": "on" if audio else "off"
+        }
+        if proxy and proxy.strip():
+            params["proxy"] = proxy.strip()
+
         resp = requests.get(f"{base_url}/v2/create", params=params, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("status") and data.get("profile_id"):
                 return data["profile_id"]
     except Exception as e:
-        safe_print(f"Lỗi gọi create profile GPM: {e}")
+        safe_print(f"Lỗi gọi create profile GPM v2: {e}")
     return None
 
 class GpmBulkCreateWorker(QThread):
@@ -1347,7 +1378,7 @@ class GpmBulkCreateWorker(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(int, int, int) # created, skipped, failed
 
-    def __init__(self, api_url, profile_names, group="All", proxy="", canvas=True, font=True, webrtc=True, skip_existing=True):
+    def __init__(self, api_url, profile_names, group="All", proxy="", canvas=True, font=True, webrtc=True, client_rect=True, webgl=True, audio=True, skip_existing=True):
         super().__init__()
         self.api_url = api_url
         self.profile_names = profile_names
@@ -1356,6 +1387,9 @@ class GpmBulkCreateWorker(QThread):
         self.canvas = canvas
         self.font = font
         self.webrtc = webrtc
+        self.client_rect = client_rect
+        self.webgl = webgl
+        self.audio = audio
         self.skip_existing = skip_existing
         self.is_running = True
 
@@ -1395,7 +1429,10 @@ class GpmBulkCreateWorker(QThread):
                 proxy=self.proxy,
                 canvas=self.canvas,
                 font=self.font,
-                webrtc=self.webrtc
+                webrtc=self.webrtc,
+                client_rect=self.client_rect,
+                webgl=self.webgl,
+                audio=self.audio
             )
 
             if pid:
@@ -1553,9 +1590,23 @@ class GpmBulkCreatorDialog(QDialog):
         row_gpm_opt.addWidget(self.input_proxy, stretch=1)
         grp_layout.addLayout(row_gpm_opt)
 
-        row_checks = QHBoxLayout()
-        self.cb_canvas = QCheckBox("Fake Canvas")
+        row_checks_1 = QHBoxLayout()
+        self.cb_canvas = QCheckBox("Canvas Noise")
         self.cb_canvas.setChecked(True)
+        self.cb_client_rect = QCheckBox("Client Rect Noise")
+        self.cb_client_rect.setChecked(True)
+        self.cb_webgl = QCheckBox("WebGL Image Noise")
+        self.cb_webgl.setChecked(True)
+        self.cb_audio = QCheckBox("Audio Noise")
+        self.cb_audio.setChecked(True)
+
+        row_checks_1.addWidget(self.cb_canvas)
+        row_checks_1.addWidget(self.cb_client_rect)
+        row_checks_1.addWidget(self.cb_webgl)
+        row_checks_1.addWidget(self.cb_audio)
+        grp_layout.addLayout(row_checks_1)
+
+        row_checks_2 = QHBoxLayout()
         self.cb_font = QCheckBox("Fake Font")
         self.cb_font.setChecked(True)
         self.cb_webrtc = QCheckBox("WebRTC Protection")
@@ -1563,11 +1614,10 @@ class GpmBulkCreatorDialog(QDialog):
         self.cb_skip_existing = QCheckBox("Bỏ qua nếu đã tồn tại")
         self.cb_skip_existing.setChecked(True)
 
-        row_checks.addWidget(self.cb_canvas)
-        row_checks.addWidget(self.cb_font)
-        row_checks.addWidget(self.cb_webrtc)
-        row_checks.addWidget(self.cb_skip_existing)
-        grp_layout.addLayout(row_checks)
+        row_checks_2.addWidget(self.cb_font)
+        row_checks_2.addWidget(self.cb_webrtc)
+        row_checks_2.addWidget(self.cb_skip_existing)
+        grp_layout.addLayout(row_checks_2)
 
         layout.addWidget(grp_settings)
 
@@ -1664,6 +1714,9 @@ class GpmBulkCreatorDialog(QDialog):
         group = self.combo_group.currentText().strip() or "All"
         proxy = self.input_proxy.text().strip()
         canvas = self.cb_canvas.isChecked()
+        client_rect = self.cb_client_rect.isChecked()
+        webgl = self.cb_webgl.isChecked()
+        audio = self.cb_audio.isChecked()
         font = self.cb_font.isChecked()
         webrtc = self.cb_webrtc.isChecked()
         skip_existing = self.cb_skip_existing.isChecked()
@@ -1684,6 +1737,9 @@ class GpmBulkCreatorDialog(QDialog):
             canvas=canvas,
             font=font,
             webrtc=webrtc,
+            client_rect=client_rect,
+            webgl=webgl,
+            audio=audio,
             skip_existing=skip_existing
         )
         self.worker.log_signal.connect(self.append_log)
