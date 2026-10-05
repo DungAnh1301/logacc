@@ -434,8 +434,33 @@ APP_DIR = get_app_dir()
 RECOVERY_EMAILS_FILE = os.path.join(APP_DIR, "recovery_emails.txt")
 NICKNAMES_FILE = os.path.join(APP_DIR, "nicknames.txt")
 AVATARS_DIR = os.path.join(APP_DIR, "avatars")
+GUI_CONFIG_FILE = os.path.join(APP_DIR, "gui_config.json")
 
 os.makedirs(AVATARS_DIR, exist_ok=True)
+
+def load_gui_config():
+    candidate_paths = [
+        GUI_CONFIG_FILE,
+        os.path.join(APP_DIR, "gui_config.json"),
+        os.path.join(APP_DIR, "dist", "gui_config.json"),
+        r"E:\Outh2 hotmail\gui_config.json",
+        r"E:\Outh2 hotmail\dist\gui_config.json",
+    ]
+    for p in candidate_paths:
+        if p and os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+def save_gui_config(cfg_dict):
+    try:
+        with open(GUI_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg_dict, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 def load_recovery_emails():
     candidate_paths = [
@@ -2446,6 +2471,55 @@ class MainWindow(QWidget):
 
         self.setLayout(main_layout)
         self.refresh_recovery_combo()
+        self.load_settings_to_gui()
+
+        # Tự động lưu cấu hình mỗi khi người dùng thay đổi giá trị trên giao diện
+        self.acc_input.textChanged.connect(self.save_settings_from_gui)
+        self.recovery_combo.currentTextChanged.connect(self.save_settings_from_gui)
+        self.gpm_profile_input.textChanged.connect(self.save_settings_from_gui)
+        self.gpm_api_input.textChanged.connect(self.save_settings_from_gui)
+        self.cb_change_nickname.toggled.connect(self.save_settings_from_gui)
+        self.cb_change_avatar.toggled.connect(self.save_settings_from_gui)
+
+    def load_settings_to_gui(self):
+        cfg = load_gui_config()
+        if not cfg:
+            return
+        if "acc_input" in cfg and cfg["acc_input"]:
+            self.acc_input.setText(cfg["acc_input"])
+        if "gpm_profile" in cfg and cfg["gpm_profile"]:
+            self.gpm_profile_input.setText(cfg["gpm_profile"])
+        if "gpm_api" in cfg and cfg["gpm_api"]:
+            self.gpm_api_input.setText(cfg["gpm_api"])
+        if "cb_change_nickname" in cfg:
+            self.cb_change_nickname.setChecked(bool(cfg["cb_change_nickname"]))
+        if "cb_change_avatar" in cfg:
+            self.cb_change_avatar.setChecked(bool(cfg["cb_change_avatar"]))
+        if "recovery_email" in cfg and cfg["recovery_email"]:
+            rec = cfg["recovery_email"]
+            idx = self.recovery_combo.findText(rec)
+            if idx >= 0:
+                self.recovery_combo.setCurrentIndex(idx)
+            else:
+                self.recovery_combo.setEditText(rec)
+
+    def save_settings_from_gui(self, *args):
+        try:
+            cfg = {
+                "acc_input": self.acc_input.text().strip(),
+                "recovery_email": self.recovery_combo.currentText().strip(),
+                "gpm_profile": self.gpm_profile_input.text().strip(),
+                "gpm_api": self.gpm_api_input.text().strip(),
+                "cb_change_nickname": self.cb_change_nickname.isChecked(),
+                "cb_change_avatar": self.cb_change_avatar.isChecked()
+            }
+            save_gui_config(cfg)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.save_settings_from_gui()
+        super().closeEvent(event)
 
     def refresh_recovery_combo(self, select_email=None):
         target = select_email.strip() if select_email else self.recovery_combo.currentText().strip()
