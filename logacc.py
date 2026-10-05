@@ -2356,6 +2356,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.worker = None
         self.vpn_gpm_running = False
+        self.otp_auto_timer = None
         self.background_log_signal.connect(self.update_log)
         self.vpn_gpm_finished_signal.connect(self.on_vpn_gpm_finished)
         self.gpm_api_detected_signal.connect(self.on_gpm_api_detected)
@@ -3795,6 +3796,11 @@ class MainWindow(QWidget):
         except Exception as e:
             self.log_output.append(f"⚠️ [VPN] Không thể ngắt VPN tự động: {str(e)}")
 
+        # Hủy đếm giờ tự động chạy VPN+GPM nếu đang đếm
+        if self.otp_auto_timer and self.otp_auto_timer.isActive():
+            self.otp_auto_timer.stop()
+            self.log_output.append("⏹️ [Tự động] Đã hủy đếm giờ tự động chạy VPN+GPM do đã bấm STOP.")
+
         self.acc_input.clear()
         self.advance_gpm_profile()
 
@@ -3830,8 +3836,24 @@ class MainWindow(QWidget):
         if otp:
             QApplication.clipboard().setText(otp)
             self.log_output.append(f"🎯 ĐÃ COPY MÃ OTP VÀO BỘ NHỚ TẠM: {otp}")
+            # Đếm 3s tự động chạy VPN+GPM theo yêu cầu
+            self.log_output.append("⏳ [Tự động] Đã lấy OTP thành công -> Đang đếm 3s để tự động khởi chạy VPN+GPM...")
+            if not self.otp_auto_timer:
+                self.otp_auto_timer = QTimer(self)
+                self.otp_auto_timer.setSingleShot(True)
+                self.otp_auto_timer.timeout.connect(self.auto_start_vpn_gpm_after_otp)
+            self.otp_auto_timer.stop()
+            self.otp_auto_timer.start(3000)
         else:
             self.log_output.append("❌ Không tìm thấy mã OTP nào từ tài khoản này!")
+
+    def auto_start_vpn_gpm_after_otp(self):
+        """Tự động kích hoạt VPN+GPM sau 3s khi nhận OTP thành công"""
+        if self.vpn_gpm_running:
+            self.log_output.append("ℹ️ [Tự động] Quy trình VPN+GPM hiện đang chạy sẵn.")
+            return
+        self.log_output.append("🚀 [Tự động] Hết 3s -> Bắt đầu tự động kích hoạt Play VPN+GPM...")
+        self.copy_link_and_vpn()
 
     def fetch_and_copy_otp(self):
         """Quét và lấy mã OTP qua API ngầm trong luồng riêng, không làm đơ/lag giao diện (GUI)"""
