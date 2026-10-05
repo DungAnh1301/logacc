@@ -3166,6 +3166,15 @@ class MainWindow(QWidget):
                                 requests.get(f"{base_api}/api/v3/profiles/close/{profile_id}", timeout=5)
                             except Exception:
                                 pass
+
+                        # TỰ ĐỘNG TẮT / NGẮT KẾT NỐI EXPRESSVPN SAU KHI ĐỔI TÊN & AVATAR THÀNH CÔNG VÀ ĐÃ ĐÓNG CHROME
+                        self.background_log_signal.emit("🌐 [VPN] Đang tự động ngắt kết nối ExpressVPN...")
+                        try:
+                            cmd_path = r'cd /d "C:\Program Files\ExpressVPN" && .\expressvpnctl'
+                            subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
+                            self.background_log_signal.emit("✅ [VPN] Đã tự động ngắt kết nối ExpressVPN thành công!")
+                        except Exception as vpn_err:
+                            self.background_log_signal.emit(f"⚠️ [VPN] Không thể ngắt kết nối ExpressVPN: {vpn_err}")
                     else:
                         error_reasons = []
                         if chosen_avatar and not avatar_success:
