@@ -3222,7 +3222,7 @@ class MainWindow(QWidget):
 
         threading.Thread(target=update_thread, daemon=True).start()
 
-    def connect_vpn_us_background(self, profile_name, api_url):
+    def connect_vpn_us_background(self, profile_name, api_url, account_password=None):
         """Đổi VPN sang US; chỉ khi thành công mới mở đúng profile GPM."""
         self.log_output.append("🌐 [VPN] Bắt đầu tiến trình đổi IP sang US qua ExpressVPN...")
         
@@ -3255,7 +3255,7 @@ class MainWindow(QWidget):
                     
                     if is_connected:
                         self.background_log_signal.emit(f"🌍 [Bước 2] VPN đã kết nối US ({server_slug.upper()}) thành công!")
-                        self.open_gpm_profile_and_tiktok(profile_name, api_url)
+                        self.open_gpm_profile_and_tiktok(profile_name, api_url, account_password=account_password)
                         return
                     else:
                         self.background_log_signal.emit(f"⚠️ [VPN] Server {server_slug} phản hồi chậm, đang thử cụm khác...")
@@ -3270,8 +3270,12 @@ class MainWindow(QWidget):
         import threading
         threading.Thread(target=run_vpn, daemon=True).start()
 
-    def open_gpm_profile_and_tiktok(self, profile_name, api_url):
+    def open_gpm_profile_and_tiktok(self, profile_name, api_url, account_password=None):
         """Tìm profile theo đúng tên, mở bằng GPM API v3 rồi mở TikTok qua CDP."""
+        if not account_password:
+            acc_text = self.acc_input.text().strip() or self.result_output.text().strip()
+            _, account_password, _ = extract_email_and_password(acc_text)
+
         if not is_gpm_running():
             self.background_log_signal.emit("🚀 Phát hiện GPMLogin chưa mở -> Đang tự động mở và giải License...")
             new_api = auto_detect_or_launch_gpm(log_func=self.background_log_signal.emit)
@@ -3557,6 +3561,81 @@ class MainWindow(QWidget):
                             target_tab.wait_for_timeout(1000)
                             dismiss_tiktok_popups(target_tab, self.background_log_signal)
                             self.background_log_signal.emit("✅ [TikTok] ĐÃ MỞ MÃ QR THÀNH CÔNG! Bạn có thể đưa điện thoại vào quét ngay.")
+                            if account_password:
+                                self.background_log_signal.emit(f"🔑 [TikTok] Đã chuẩn bị sẵn mật khẩu '{account_password}' -> Sẵn sàng tự động chọn Password và nhập nếu có xác minh.")
+
+                            # Tự động theo dõi quá trình quét QR và xử lý bước xác minh (verify password)
+                            self.background_log_signal.emit("👀 [TikTok] Đang chờ bạn quét QR... Tool sẽ tự động chọn 'Password' và nhập mật khẩu hotmail nếu hiện bước xác minh!")
+                            has_filled_pass = False
+                            for scan_sec in range(1, 121):
+                                dismiss_tiktok_popups(target_tab, self.background_log_signal)
+                                try:
+                                    status_verify = target_tab.evaluate('''() => {
+                                        // 1. Kiểm tra đã đăng nhập thành công
+                                        if (document.querySelector('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"]')) {
+                                            return { state: 'logged_in' };
+                                        }
+
+                                        // 2. Kiểm tra nếu có ô nhập mật khẩu hiển thị
+                                        const passInput = document.querySelector('input[type="password"], input[autocomplete="current-password"], input[name="password"]');
+                                        if (passInput && passInput.offsetParent !== null) {
+                                            return { state: 'has_password_input' };
+                                        }
+
+                                        // 3. Kiểm tra các nút chuyển sang xác minh bằng Password (Use password / Enter password / Try another way)
+                                        const clickables = Array.from(document.querySelectorAll('button, a, div[role="button"], div[role="link"], span, p'));
+                                        for (const el of clickables) {
+                                            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                            if (txt === 'use password' || txt === 'enter password' || txt === 'log in with password' ||
+                                                txt === 'password' || txt === 'mật khẩu' || txt.includes('use password') || 
+                                                txt.includes('enter password') || txt.includes('log in with password') || txt.includes('try another way')) {
+                                                if (el.offsetParent !== null) {
+                                                    el.click();
+                                                    return { state: 'clicked_password_option', text: txt };
+                                                }
+                                            }
+                                        }
+
+                                        // 4. Kiểm tra xem mã QR đã được quét chưa ("QR code scanned")
+                                        const mask = document.querySelector('[class*="DivCodeMask"], [data-e2e="qr-code"]');
+                                        if (mask && (mask.innerText || mask.textContent || '').toLowerCase().includes('scanned')) {
+                                            return { state: 'qr_scanned' };
+                                        }
+
+                                        return { state: 'waiting' };
+                                    }''')
+
+                                    st = status_verify.get('state') if isinstance(status_verify, dict) else 'waiting'
+                                    if st == 'logged_in':
+                                        self.background_log_signal.emit(f"🎉 [TikTok] ĐÃ ĐĂNG NHẬP THÀNH CÔNG (sau {scan_sec}s)!")
+                                        break
+                                    elif st == 'clicked_password_option':
+                                        txt = status_verify.get('text', '')
+                                        self.background_log_signal.emit(f"📲 [TikTok] Phát hiện bước xác minh -> Đã tự động chọn: '{txt}'...")
+                                        target_tab.wait_for_timeout(1000)
+                                    elif st == 'has_password_input' and not has_filled_pass:
+                                        if account_password:
+                                            self.background_log_signal.emit(f"🔑 [TikTok] Đang tự động điền mật khẩu ({account_password})...")
+                                            pass_input = target_tab.locator('input[type="password"], input[autocomplete="current-password"], input[name="password"]').first
+                                            pass_input.fill(account_password)
+                                            target_tab.wait_for_timeout(500)
+                                            target_tab.keyboard.press("Enter")
+                                            target_tab.evaluate('''() => {
+                                                const btn = document.querySelector('button[type="submit"], button[data-e2e="login-button"], button[class*="Button"]');
+                                                if (btn) btn.click();
+                                            }''')
+                                            self.background_log_signal.emit("🚀 [TikTok] Đã gửi mật khẩu xác minh, đang chờ đăng nhập...")
+                                            has_filled_pass = True
+                                            target_tab.wait_for_timeout(2500)
+                                        else:
+                                            self.background_log_signal.emit("⚠️ [TikTok] Phát hiện ô nhập mật khẩu nhưng chuỗi tài khoản chưa có mật khẩu để điền tự động.")
+                                    elif st == 'qr_scanned':
+                                        if scan_sec % 5 == 0:
+                                            self.background_log_signal.emit("📱 [TikTok] Đã quét QR trên điện thoại -> Đang chờ phản hồi xác minh...")
+                                except Exception:
+                                    pass
+
+                                target_tab.wait_for_timeout(1000)
                         elif already_logged_in:
                             self.background_log_signal.emit("ℹ️ [TikTok] Tài khoản đã đăng nhập sẵn, không cần quét mã QR.")
                         else:
@@ -3599,12 +3678,18 @@ class MainWindow(QWidget):
             self.log_output.append("⚠️ Quy trình VPN+GPM đang chạy.")
             return
 
+        # Tự động nhận diện mật khẩu hotmail từ ô acc_input hoặc result_output
+        acc_text = self.acc_input.text().strip() or self.result_output.text().strip()
+        _, account_password, _ = extract_email_and_password(acc_text)
+
         self.vpn_gpm_running = True
         self.btn_play_vpn_gpm.setEnabled(False)
         self.log_output.append(
             f"🚀 [Bước 1] Bắt đầu VPN+GPM với profile: {profile_name} | API: {api_url}"
         )
-        self.connect_vpn_us_background(profile_name, api_url)
+        if account_password:
+            self.log_output.append(f"🔑 [Nhận diện mật khẩu] Sẵn sàng tự động điền mật khẩu '{account_password}' khi xác minh TikTok.")
+        self.connect_vpn_us_background(profile_name, api_url, account_password=account_password)
 
     def trigger_change_name_avatar(self, *args):
         """Kích hoạt đổi Tên Nick và Avatar trên Profile GPM đang mở hoặc mở mới."""
