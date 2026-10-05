@@ -276,6 +276,70 @@ def extract_email_and_password(raw_str):
         
     return None, None, -1
 
+# --- HÀM TỰ ĐỘNG ĐÓNG POPUP / TOOLTIP "GOT IT" / "ĐÃ HIỂU" TRÊN TIKTOK ---
+def dismiss_tiktok_popups(page, log_callback=None):
+    """
+    Tự động quét và click các popup, tooltip hướng dẫn, cookie banner, toast hoặc nút 'Got it' / 'Đã hiểu'
+    đang che khuất giao diện TikTok.
+    """
+    if not page:
+        return False
+    dismissed = False
+    try:
+        res = page.evaluate('''() => {
+            const dismissedTexts = [];
+            // 1. Quét các nút có nội dung Got it, Đã hiểu, Close toast...
+            const candidates = Array.from(document.querySelectorAll(
+                'button, div[role="button"], a[role="button"], [class*="Button"], [class*="guide"] button, ' +
+                '[role="dialog"] button, [role="tooltip"] button, .inapp-notif__close, button[aria-label="Close toast"], ' +
+                '[data-testid="tux-web-button"], [data-testid="tux-web-icon-button"]'
+            ));
+            for (const el of candidates) {
+                const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+                const lower = text.toLowerCase();
+                if (
+                    lower === 'got it' || lower === 'got it!' ||
+                    lower === 'đã hiểu' || lower === 'da hieu' ||
+                    lower === 'close toast' ||
+                    lower.startsWith('got it') || lower.startsWith('đã hiểu')
+                ) {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+                        el.click();
+                        dismissedTexts.push(text || 'Got it');
+                    }
+                }
+            }
+            return dismissedTexts.length > 0 ? dismissedTexts.join(', ') : null;
+        }''')
+        if res:
+            dismissed = True
+            msg = f"💡 [TikTok] Đã tự động click nút đóng hướng dẫn / popup: '{res}'"
+            if callable(log_callback):
+                log_callback(msg)
+            elif hasattr(log_callback, "emit"):
+                log_callback.emit(msg)
+    except Exception:
+        pass
+
+    # Dự phòng với Playwright locators
+    if not dismissed:
+        try:
+            got_it_loc = page.locator('button:has-text("Got it"), div[role="button"]:has-text("Got it"), button:has-text("Đã hiểu"), div[role="button"]:has-text("Đã hiểu")').first
+            if got_it_loc.count() > 0 and got_it_loc.is_visible():
+                got_it_loc.click(timeout=1000)
+                dismissed = True
+                msg = "💡 [TikTok] Đã tự động click nút 'Got it' qua locator."
+                if callable(log_callback):
+                    log_callback(msg)
+                elif hasattr(log_callback, "emit"):
+                    log_callback.emit(msg)
+        except Exception:
+            pass
+
+    return dismissed
+
 # --- HÀM HỖ TRỢ LẤY OTP TỪ EMAIL KHÔI PHỤC (CHIẾN THUẬT 2 PHÚT / 20S) ---
 def get_outlook_otp_via_api(recovery_acc_str, log_signal):
     try:
@@ -2625,6 +2689,7 @@ class MainWindow(QWidget):
                     # 2. BƯỚC 1: TỰ ĐỘNG VÀO TRANG CÁ NHÂN (PROFILE) TỪ TRANG CHỦ
                     self.background_log_signal.emit(f"🔍 [TikTok] Đang ở URL: {target_page.url}")
                     target_page.wait_for_timeout(2500)
+                    dismiss_tiktok_popups(target_page, self.background_log_signal)
 
                     # Kiểm tra xem đã ở sẵn trong Profile chưa (URL có chứa /@)
                     if "/@" not in target_page.url:
@@ -2632,6 +2697,7 @@ class MainWindow(QWidget):
                         
                         # Chờ tối đa 6 giây để TikTok nạp các nút điều hướng
                         for _ in range(6):
+                            dismiss_tiktok_popups(target_page, self.background_log_signal)
                             btn_check = target_page.locator('a[data-e2e="nav-profile"], button[aria-label="Profile"], a[href*="/@"], #header-more-menu-icon, div[data-e2e="profile-icon"]')
                             if btn_check.count() > 0:
                                 break
@@ -2686,6 +2752,7 @@ class MainWindow(QWidget):
 
                     # Hàm hỗ trợ mở popup Edit profile
                     def open_edit_dialog(desc="chỉnh sửa"):
+                        dismiss_tiktok_popups(target_page, self.background_log_signal)
                         self.background_log_signal.emit(f"🔍 [TikTok] Đang tìm nút 'Edit profile' để {desc}...")
                         edit_btn = target_page.locator('[data-e2e="edit-profile-entrance"], button:has-text("Edit profile"), button:has-text("Sửa hồ sơ"), [data-e2e="edit-profile-endpoint"], button:has-text("Edit")')
                         if not edit_btn.count():
@@ -3281,6 +3348,9 @@ class MainWindow(QWidget):
                             login_btn_found = False
                             already_logged_in = False
                             for attempt in range(1, 41):
+                                # Tự động phát hiện và bấm đóng popup "Got it" / "Đã hiểu" / hướng dẫn nếu xuất hiện
+                                dismiss_tiktok_popups(target_tab, self.background_log_signal)
+
                                 # Thực thi ép mute mỗi giây
                                 try:
                                     target_tab.evaluate("window.__mute_tiktok && window.__mute_tiktok()")
@@ -3340,6 +3410,8 @@ class MainWindow(QWidget):
 
                             # 4. BẤM VÀO NÚT 'LOG IN'
                             if login_btn_found:
+                                # Dọn dẹp popup "Got it" một lần nữa trước khi bấm Log In
+                                dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                 self.background_log_signal.emit("👆 [TikTok] Đang bấm vào nút 'Log in' để mở bảng đăng nhập...")
                                 clicked = False
                                 for c_try in range(3):
@@ -3375,12 +3447,14 @@ class MainWindow(QWidget):
 
                                 if clicked:
                                     target_tab.wait_for_timeout(2000)
+                                    dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                     self.background_log_signal.emit("✅ [TikTok] ĐÃ CLICK NÚT 'LOG IN' THÀNH CÔNG! Bảng đăng nhập đã hiển thị.")
                                 else:
                                     self.background_log_signal.emit("⚠️ [TikTok] Không thể click vào nút Log in.")
                             elif already_logged_in:
                                 self.background_log_signal.emit("ℹ️ [TikTok] Tài khoản đã đăng nhập sẵn, không cần bấm 'Log in'.")
                             else:
+                                dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                 self.background_log_signal.emit("⚠️ [TikTok] Hết thời gian chờ (40s) nhưng chưa thấy nút 'Log in'.")
 
                             # 5. Tắt tiếng video lần cuối để tuyệt đối yên tĩnh
