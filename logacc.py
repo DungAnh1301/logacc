@@ -3156,11 +3156,114 @@ class MainWindow(QWidget):
             open_url = f"{remote_address}/json/new?{urllib.parse.quote('https://www.tiktok.com/', safe=':/')}"
             tab_response = requests.put(open_url, timeout=15)
             tab_response.raise_for_status()
+
+            tab_id = None
+            try:
+                tab_data = tab_response.json()
+                tab_id = tab_data.get("id")
+                if tab_id:
+                    requests.get(f"{remote_address}/json/activate/{tab_id}", timeout=5)
+            except Exception:
+                pass
+
             self.background_log_signal.emit(
                 f"✅ Đã mở profile {profile_name} và vào tiktok.com thành công."
             )
 
-            # Kết thúc mở profile và tiktok, KHÔNG tự động đổi tên/avatar
+            # Nhảy sang tab TikTok này và tắt tiếng toàn bộ trang (Mute site)
+            try:
+                patch_playwright_driver()
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    browser = p.chromium.connect_over_cdp(remote_address)
+                    contexts = browser.contexts
+                    if contexts:
+                        context = contexts[0]
+                        target_tab = None
+                        for pg in context.pages:
+                            if "tiktok.com" in pg.url:
+                                target_tab = pg
+                                break
+                        if not target_tab and context.pages:
+                            target_tab = context.pages[-1]
+
+                        if target_tab:
+                            # 1. Nhảy sang tab TikTok
+                            target_tab.bring_to_front()
+
+                            # 2. Tắt tiếng tự động toàn diện cho trang (Mute site)
+                            mute_script = '''() => {
+                                const silenceMedia = (el) => {
+                                    try {
+                                        el.muted = true;
+                                        el.volume = 0;
+                                    } catch (e) {}
+                                };
+
+                                document.querySelectorAll('video, audio').forEach(silenceMedia);
+
+                                try {
+                                    const origPlay = HTMLMediaElement.prototype.play;
+                                    HTMLMediaElement.prototype.play = function() {
+                                        silenceMedia(this);
+                                        return origPlay.apply(this, arguments);
+                                    };
+
+                                    Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
+                                        set: function(v) {},
+                                        get: function() { return true; },
+                                        configurable: true
+                                    });
+
+                                    Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
+                                        set: function(v) {},
+                                        get: function() { return 0; },
+                                        configurable: true
+                                    });
+                                } catch (e) {}
+
+                                try {
+                                    if (window.AudioContext) {
+                                        const origAudio = window.AudioContext;
+                                        window.AudioContext = function() {
+                                            const ctx = new origAudio();
+                                            try { ctx.suspend(); } catch (e) {}
+                                            return ctx;
+                                        };
+                                    }
+                                    if (window.webkitAudioContext) {
+                                        const origWebkit = window.webkitAudioContext;
+                                        window.webkitAudioContext = function() {
+                                            const ctx = new origWebkit();
+                                            try { ctx.suspend(); } catch (e) {}
+                                            return ctx;
+                                        };
+                                    }
+                                } catch (e) {}
+
+                                try {
+                                    const obs = new MutationObserver(() => {
+                                        document.querySelectorAll('video, audio').forEach(silenceMedia);
+                                    });
+                                    obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+                                } catch (e) {}
+                            }'''
+
+                            target_tab.evaluate(mute_script)
+
+                            try:
+                                cdp_sess = context.new_cdp_session(target_tab)
+                                cdp_sess.send("Page.addScriptToEvaluateOnNewDocument", {
+                                    "source": f"({mute_script})()"
+                                })
+                            except Exception:
+                                pass
+
+                            self.background_log_signal.emit("🔇 [TikTok] Đã nhảy sang tab TikTok và TẮT TIẾNG (Mute site) thành công.")
+            except Exception as mute_err:
+                self.background_log_signal.emit(f"⚠️ [TikTok] Ghi chú mute site: {mute_err}")
+
+            # Kết thúc mở profile và tiktok, dừng lại tại đây, KHÔNG tự động đổi tên/avatar
             # Chỉ khi người dùng bấm nút [Đổi Tên + Avatar] thì mới chạy tiến trình đổi!
         except Exception as e:
             self.background_log_signal.emit(f"❌ [GPM] {str(e)}")
