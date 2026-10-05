@@ -2555,6 +2555,13 @@ class MainWindow(QWidget):
                     if "/@" not in target_page.url:
                         self.background_log_signal.emit("🚀 [Bước 1: Từ Trang chủ] Đang tự động tìm lối vào Profile...")
                         
+                        # Chờ tối đa 6 giây để TikTok nạp các nút điều hướng
+                        for _ in range(6):
+                            btn_check = target_page.locator('a[data-e2e="nav-profile"], button[aria-label="Profile"], a[href*="/@"], #header-more-menu-icon, div[data-e2e="profile-icon"]')
+                            if btn_check.count() > 0:
+                                break
+                            target_page.wait_for_timeout(1000)
+
                         # Cách 1: Nút Profile ở thanh điều hướng trái (theo đúng HTML người dùng gửi)
                         profile_btn = target_page.locator('a[data-e2e="nav-profile"]')
                         if not profile_btn.count():
@@ -2583,7 +2590,7 @@ class MainWindow(QWidget):
 
                         # Cách 2: Nếu chưa vào được, bấm vào Avatar góc trên bên phải (header-more-menu-icon)
                         if not clicked_nav and "/@" not in target_page.url:
-                            header_icon = target_page.locator('#header-more-menu-icon, div[data-e2e="profile-icon"]')
+                            header_icon = target_page.locator('#header-more-menu-icon, div[data-e2e="profile-icon"], div[class*="DivAvatarContainer"]')
                             if header_icon.count() > 0:
                                 self.background_log_signal.emit("👆 [TikTok] Nhấp vào icon Avatar góc trên bên phải để mở menu...")
                                 try:
@@ -3079,28 +3086,8 @@ class MainWindow(QWidget):
                 f"✅ Đã mở profile {profile_name} và vào tiktok.com thành công."
             )
 
-            # Mô típ kiểm tra đổi tên nick & avatar TikTok
-            do_nick = self.cb_change_nickname.isChecked()
-            do_avatar = self.cb_change_avatar.isChecked()
-
-            if do_nick or do_avatar:
-                chosen_nick = get_random_nickname() if do_nick else None
-                chosen_avatar = get_random_avatar() if do_avatar else None
-
-                if do_nick:
-                    if chosen_nick:
-                        self.background_log_signal.emit(f"🎯 [TikTok] Tên nick ngẫu nhiên: '{chosen_nick}'")
-                    else:
-                        self.background_log_signal.emit("ℹ️ [TikTok] File nicknames.txt trống, bỏ qua đổi tên.")
-
-                if do_avatar:
-                    if chosen_avatar:
-                        avatar_name = os.path.basename(chosen_avatar)
-                        self.background_log_signal.emit(f"🖼️ [TikTok] Ảnh avatar ngẫu nhiên: '{avatar_name}'")
-                    else:
-                        self.background_log_signal.emit("ℹ️ [TikTok] Thư mục avatars/ trống, bỏ qua đổi avatar.")
-
-                self.run_tiktok_profile_update(remote_address, chosen_nick, chosen_avatar, profile_id=target.get('id'), api_url=api_url)
+            # Kết thúc mở profile và tiktok, KHÔNG tự động đổi tên/avatar
+            # Chỉ khi người dùng bấm nút [Đổi Tên + Avatar] thì mới chạy tiến trình đổi!
         except Exception as e:
             self.background_log_signal.emit(f"❌ [GPM] {str(e)}")
 
