@@ -3570,38 +3570,136 @@ class MainWindow(QWidget):
                             for scan_sec in range(1, 121):
                                 dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                 try:
-                                    status_verify = target_tab.evaluate('''() => {
-                                        // 1. Kiểm tra đã đăng nhập thành công
-                                        if (document.querySelector('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"]')) {
-                                            return { state: 'logged_in' };
-                                        }
+                                    # 1. Kiểm tra URL hoặc avatar đã đăng nhập thành công chưa
+                                    curr_url = target_tab.url.lower()
+                                    if "tiktok.com" in curr_url and "/login" not in curr_url and ("/@" in curr_url or "foryou" in curr_url or curr_url.rstrip("/").endswith("tiktok.com")):
+                                        avatar_found = target_tab.evaluate('''() => {
+                                            return !!document.querySelector('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"], a[href*="/@"]');
+                                        }''')
+                                        if avatar_found:
+                                            self.background_log_signal.emit(f"🎉 [TikTok] ĐÃ ĐĂNG NHẬP THÀNH CÔNG (sau {scan_sec}s)! URL: {target_tab.url}")
+                                            break
 
-                                        // 2. Kiểm tra nếu có ô nhập mật khẩu hiển thị
-                                        const passInput = document.querySelector('input[type="password"], input[autocomplete="current-password"], input[name="password"]');
-                                        if (passInput && passInput.offsetParent !== null) {
-                                            return { state: 'has_password_input' };
-                                        }
+                                    # 2. Kiểm tra nếu đã xuất hiện ô nhập mật khẩu
+                                    pass_input_loc = target_tab.locator(
+                                        'input[type="password"], input[autocomplete*="password"], input[name*="password"], input[placeholder*="Password"], input[placeholder*="Mật khẩu"]'
+                                    ).first
+                                    is_pass_visible = False
+                                    try:
+                                        if pass_input_loc.count() > 0 and pass_input_loc.is_visible(timeout=200):
+                                            is_pass_visible = True
+                                    except Exception:
+                                        pass
 
-                                        // 3. Kiểm tra các nút chuyển sang xác minh bằng Password (Use password / Enter password / Try another way)
-                                        const clickables = Array.from(document.querySelectorAll('button, a, div[role="button"], div[role="link"], span, p'));
-                                        for (const el of clickables) {
-                                            const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                                            if (txt === 'use password' || txt === 'enter password' || txt === 'log in with password' ||
-                                                txt === 'password' || txt === 'mật khẩu' || txt.includes('use password') || 
-                                                txt.includes('enter password') || txt.includes('log in with password') || txt.includes('try another way')) {
-                                                if (el.offsetParent !== null) {
-                                                    el.click();
-                                                    return { state: 'clicked_password_option', text: txt };
+                                    if is_pass_visible and not has_filled_pass:
+                                        if account_password:
+                                            self.background_log_signal.emit(f"🔑 [TikTok] Đã tìm thấy ô nhập mật khẩu -> Đang tự động điền ({account_password})...")
+                                            try:
+                                                pass_input_loc.click(force=True, timeout=1000)
+                                                target_tab.wait_for_timeout(300)
+                                                pass_input_loc.fill(account_password)
+                                                target_tab.wait_for_timeout(500)
+                                                target_tab.keyboard.press("Enter")
+                                            except Exception:
+                                                target_tab.keyboard.type(account_password)
+                                                target_tab.keyboard.press("Enter")
+
+                                            target_tab.wait_for_timeout(500)
+                                            # Thử click nút submit/login nếu có
+                                            for submit_sel in [
+                                                'button[type="submit"]',
+                                                'button[data-e2e="login-button"]',
+                                                'button:has-text("Log in")',
+                                                'button:has-text("Đăng nhập")',
+                                                'button:has-text("Next")',
+                                                'button:has-text("Tiếp tục")',
+                                                'button:has-text("Continue")',
+                                                '[class*="Button"]:has-text("Log in")',
+                                                '[class*="Button"]:has-text("Next")'
+                                            ]:
+                                                try:
+                                                    s_btn = target_tab.locator(submit_sel).first
+                                                    if s_btn.count() > 0 and s_btn.is_visible(timeout=200):
+                                                        s_btn.click(timeout=1000, force=True)
+                                                        break
+                                                except Exception:
+                                                    pass
+
+                                            self.background_log_signal.emit("🚀 [TikTok] Đã gửi mật khẩu xác minh, đang chờ phê duyệt đăng nhập...")
+                                            has_filled_pass = True
+                                            target_tab.wait_for_timeout(2500)
+                                            continue
+                                        else:
+                                            self.background_log_signal.emit("⚠️ [TikTok] Phát hiện ô nhập mật khẩu nhưng chuỗi tài khoản chưa có mật khẩu để điền tự động.")
+
+                                    # 3. Kiểm tra màn hình "Verify it’s really you" và click chọn mục 'Password'
+                                    clicked_pw_option = False
+                                    # 3.1 Thử bằng Playwright locator đa dạng
+                                    for pw_sel in [
+                                        '[data-e2e="channel-item"]:has-text("Password")',
+                                        '[data-e2e="channel-item"]:has-text("Mật khẩu")',
+                                        'div[role="link"]:has-text("Password")',
+                                        'div[role="button"]:has-text("Password")',
+                                        '[class*="DivBoxContainer"]:has-text("Password")',
+                                        'div:text-is("Password")',
+                                        'p:text-is("Password")',
+                                        'span:text-is("Password")',
+                                        'button:has-text("Use password")',
+                                        'button:has-text("Enter password")',
+                                        'a:has-text("Use password")'
+                                    ]:
+                                        try:
+                                            pw_cand = target_tab.locator(pw_sel).first
+                                            if pw_cand.count() > 0 and pw_cand.is_visible(timeout=200):
+                                                self.background_log_signal.emit("📲 [TikTok] Phát hiện mục xác minh 'Password' -> Đang tự động click chọn...")
+                                                pw_cand.scroll_into_view_if_needed(timeout=500)
+                                                pw_cand.click(timeout=1000, force=True)
+                                                clicked_pw_option = True
+                                                target_tab.wait_for_timeout(1000)
+                                                break
+                                        except Exception:
+                                            pass
+
+                                    # 3.2 Bổ trợ bằng evaluate JS (vượt qua các trường hợp CSS position:fixed)
+                                    if not clicked_pw_option and not is_pass_visible:
+                                        js_click_res = target_tab.evaluate('''() => {
+                                            const items = Array.from(document.querySelectorAll('[data-e2e="channel-item"], [class*="DivBoxContainer"], div[role="link"], div[role="button"], button, a, div, span'));
+                                            for (const el of items) {
+                                                const txt = (el.innerText || el.textContent || '').trim();
+                                                const isPass = (
+                                                    txt === 'Password' ||
+                                                    txt === 'Mật khẩu' ||
+                                                    txt.toLowerCase() === 'use password' ||
+                                                    txt.toLowerCase() === 'enter password' ||
+                                                    txt.toLowerCase() === 'log in with password'
+                                                );
+                                                if (isPass) {
+                                                    const rect = el.getBoundingClientRect();
+                                                    if (rect.width > 0 && rect.height > 0) {
+                                                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                                            try { el.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                                        });
+                                                        try { el.click(); } catch(e) {}
+                                                        return { clicked: true, text: txt };
+                                                    }
                                                 }
                                             }
-                                        }
+                                            return { clicked: false };
+                                        }''')
+                                        if isinstance(js_click_res, dict) and js_click_res.get('clicked'):
+                                            self.background_log_signal.emit(f"📲 [TikTok] Đã chọn phương thức xác minh '{js_click_res.get('text')}' qua JavaScript!")
+                                            clicked_pw_option = True
+                                            target_tab.wait_for_timeout(1000)
 
-                                        // 4. Kiểm tra xem mã QR đã được quét chưa ("QR code scanned")
+                                    # 4. Kiểm tra trạng thái đăng nhập qua evaluate
+                                    status_verify = target_tab.evaluate('''() => {
+                                        if (document.querySelector('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"], a[href*="/@"]')) {
+                                            return { state: 'logged_in' };
+                                        }
                                         const mask = document.querySelector('[class*="DivCodeMask"], [data-e2e="qr-code"]');
                                         if (mask && (mask.innerText || mask.textContent || '').toLowerCase().includes('scanned')) {
                                             return { state: 'qr_scanned' };
                                         }
-
                                         return { state: 'waiting' };
                                     }''')
 
@@ -3609,29 +3707,12 @@ class MainWindow(QWidget):
                                     if st == 'logged_in':
                                         self.background_log_signal.emit(f"🎉 [TikTok] ĐÃ ĐĂNG NHẬP THÀNH CÔNG (sau {scan_sec}s)!")
                                         break
-                                    elif st == 'clicked_password_option':
-                                        txt = status_verify.get('text', '')
-                                        self.background_log_signal.emit(f"📲 [TikTok] Phát hiện bước xác minh -> Đã tự động chọn: '{txt}'...")
-                                        target_tab.wait_for_timeout(1000)
-                                    elif st == 'has_password_input' and not has_filled_pass:
-                                        if account_password:
-                                            self.background_log_signal.emit(f"🔑 [TikTok] Đang tự động điền mật khẩu ({account_password})...")
-                                            pass_input = target_tab.locator('input[type="password"], input[autocomplete="current-password"], input[name="password"]').first
-                                            pass_input.fill(account_password)
-                                            target_tab.wait_for_timeout(500)
-                                            target_tab.keyboard.press("Enter")
-                                            target_tab.evaluate('''() => {
-                                                const btn = document.querySelector('button[type="submit"], button[data-e2e="login-button"], button[class*="Button"]');
-                                                if (btn) btn.click();
-                                            }''')
-                                            self.background_log_signal.emit("🚀 [TikTok] Đã gửi mật khẩu xác minh, đang chờ đăng nhập...")
-                                            has_filled_pass = True
-                                            target_tab.wait_for_timeout(2500)
-                                        else:
-                                            self.background_log_signal.emit("⚠️ [TikTok] Phát hiện ô nhập mật khẩu nhưng chuỗi tài khoản chưa có mật khẩu để điền tự động.")
                                     elif st == 'qr_scanned':
                                         if scan_sec % 5 == 0:
-                                            self.background_log_signal.emit("📱 [TikTok] Đã quét QR trên điện thoại -> Đang chờ phản hồi xác minh...")
+                                            self.background_log_signal.emit("📱 [TikTok] Đã quét QR trên điện thoại -> Đang chờ xác minh...")
+                                    elif not clicked_pw_option and not is_pass_visible:
+                                        if scan_sec % 10 == 0:
+                                            self.background_log_signal.emit(f"⏳ [TikTok] Đang chờ quét QR / xác minh ({scan_sec}/120s)...")
                                 except Exception:
                                     pass
 
