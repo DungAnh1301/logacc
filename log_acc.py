@@ -1862,6 +1862,37 @@ def find_gpm_profile(api_url, profile_name):
         pass
     return None
 
+def set_gpm_profile_mute_site(profile_subpath):
+    """Cấu hình Native 'Mute site' (Block sound) cho domain tiktok.com trực tiếp vào Preferences của Chrome Profile GPM."""
+    if not profile_subpath:
+        return False
+    roots = [r"E:\GPM", r"D:\GPM", r"C:\GPM", os.path.expanduser(r"~\AppData\Local\GPM")]
+    for root in roots:
+        pref_path = os.path.join(root, str(profile_subpath).strip(), "Default", "Preferences")
+        pref_dir = os.path.dirname(pref_path)
+        if os.path.isdir(pref_dir):
+            data = {}
+            if os.path.isfile(pref_path):
+                try:
+                    with open(pref_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            prof = data.setdefault("profile", {})
+            cs = prof.setdefault("content_settings", {})
+            exc = cs.setdefault("exceptions", {})
+            snd = exc.setdefault("sound", {})
+            # setting: 2 = Block sound (Native Chrome 'Mute site' biểu tượng loa gạch chéo)
+            snd["https://www.tiktok.com:443,*"] = {"setting": 2}
+            snd["https://[*.]tiktok.com:443,*"] = {"setting": 2}
+            try:
+                with open(pref_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                return True
+            except Exception:
+                pass
+    return False
+
 def create_single_gpm_profile(api_url, name, group="All", proxy="", canvas=True, font=True, webrtc=True, client_rect=True, webgl=True, audio=True):
     """Tạo 1 profile mới trên GPM với đầy đủ 4 chế độ Noise (Canvas, ClientRect, WebGL, Audio) đều ON"""
     base_url = get_gpm_base_url(api_url)
@@ -3266,10 +3297,16 @@ class MainWindow(QWidget):
                 else:
                     raise RuntimeError(f"Không tìm thấy và không thể tự động tạo profile: {profile_name}")
 
+            # Cấu hình Native 'Mute site' (Block sound) vào file Preferences của Profile GPM trước khi mở
+            if target and target.get("profile_path"):
+                if set_gpm_profile_mute_site(target.get("profile_path")):
+                    self.background_log_signal.emit(f"🔇 [GPM] Đã bật Native 'Mute site' (Block sound) cho TikTok trong profile {target.get('name')}!")
+
             response = requests.get(
                 f"{api_url}/profiles/start/{target['id']}",
                 params={
-                    "addtional_args": "--mute-audio",
+                    "addination_args": "--mute-audio",
+                    "additional_args": "--mute-audio",
                     "args": "--mute-audio",
                     "custom_args": "--mute-audio"
                 },
@@ -3631,7 +3668,18 @@ class MainWindow(QWidget):
 
                     # Mở profile nếu chưa mở để lấy remote_debugging_address
                     self.background_log_signal.emit(f"🚀 [GPM] Đang kết nối tới profile {profile_name}...")
-                    start_res = requests.get(f"{api}/profiles/start/{target['id']}", timeout=30)
+                    if target and target.get("profile_path"):
+                        set_gpm_profile_mute_site(target.get("profile_path"))
+                    start_res = requests.get(
+                        f"{api}/profiles/start/{target['id']}",
+                        params={
+                            "addination_args": "--mute-audio",
+                            "additional_args": "--mute-audio",
+                            "args": "--mute-audio",
+                            "custom_args": "--mute-audio"
+                        },
+                        timeout=30
+                    )
                     start_res.raise_for_status()
                     start_payload = start_res.json()
                     if not start_payload.get("success"):
