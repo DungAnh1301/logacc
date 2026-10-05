@@ -3278,6 +3278,10 @@ class MainWindow(QWidget):
             if not remote_address.startswith(("http://", "https://")):
                 remote_address = f"http://{remote_address}"
 
+            # Đợi 3 giây sau khi bật Chrome để Chrome và extension ExpressVPN ổn định
+            self.background_log_signal.emit("⏳ [GPM] Đã khởi động Chrome -> Đang đợi 3s để Chrome và tiện ích (ExpressVPN) ổn định...")
+            time.sleep(3)
+
             # 1. Kết nối Playwright tới trình duyệt GPM TRƯỚC TIÊN để cài đặt Mute ngay từ đầu
             try:
                 patch_playwright_driver()
@@ -3287,14 +3291,20 @@ class MainWindow(QWidget):
                     contexts = browser.contexts
                     if contexts:
                         context = contexts[0]
-                        # Tìm tab đang có hoặc tạo mới
+                        # Tìm tab đang có hoặc tạo mới (bỏ qua tab của ExpressVPN / Chrome extension)
                         target_tab = None
                         for pg in context.pages:
-                            if "tiktok.com" in pg.url:
+                            u = pg.url.lower()
+                            if "expressvpn" in u or "chrome-extension://" in u:
+                                continue
+                            if "tiktok.com" in u:
                                 target_tab = pg
                                 break
                         if not target_tab:
                             for pg in context.pages:
+                                u = pg.url.lower()
+                                if "expressvpn" in u or "chrome-extension://" in u:
+                                    continue
                                 if pg.url in ("about:blank", "chrome://newtab/", ""):
                                     target_tab = pg
                                     break
@@ -3405,8 +3415,8 @@ class MainWindow(QWidget):
                             pass
 
                         # 3. Phóng to cửa sổ và đặt viewport chuẩn Desktop
-                        target_tab.bring_to_front()
                         try:
+                            target_tab.bring_to_front()
                             target_tab.set_viewport_size({"width": 1280, "height": 800})
                         except Exception:
                             pass
@@ -3417,6 +3427,14 @@ class MainWindow(QWidget):
                             target_tab.goto("https://www.tiktok.com/login/qrcode", wait_until="domcontentloaded", timeout=60000)
                         except Exception as goto_err:
                             self.background_log_signal.emit(f"⚠️ [TikTok] Ghi chú nạp URL: {goto_err}")
+
+                        # Đếm 3 giây sau khi chuyển sang tiktok qrcode và ép tab TikTok hiển thị trên cùng (tránh bị ExpressVPN cướp focus)
+                        self.background_log_signal.emit("⏳ [TikTok] Đang đợi 3s để ổn định trang và giữ tab TikTok trên cùng...")
+                        time.sleep(3)
+                        try:
+                            target_tab.bring_to_front()
+                        except Exception:
+                            pass
 
                         self.background_log_signal.emit("⏳ [TikTok] Đang đợi trang đăng nhập mã QR tải hoàn tất...")
 
