@@ -3260,6 +3260,56 @@ class MainWindow(QWidget):
                                 pass
 
                             self.background_log_signal.emit("🔇 [TikTok] Đã nhảy sang tab TikTok và TẮT TIẾNG (Mute site) thành công.")
+
+                            # 3. Tự động bấm nút Login (Log in) nếu chưa đăng nhập
+                            self.background_log_signal.emit("🔍 [TikTok] Đang kiểm tra nút 'Log in'...")
+                            login_clicked = False
+                            for _ in range(6):
+                                try:
+                                    res = target_tab.evaluate('''() => {
+                                        const selectors = [
+                                            '#header-login-button',
+                                            'button[data-e2e="top-login-button"]',
+                                            'button[aria-label="Log in"]',
+                                            'div[data-testid="tux-web-button-container"] button',
+                                            'button[data-testid="tux-web-button"]'
+                                        ];
+                                        for (const s of selectors) {
+                                            const el = document.querySelector(s);
+                                            if (el) {
+                                                el.click();
+                                                return { success: true, selector: s };
+                                            }
+                                        }
+                                        for (const b of document.querySelectorAll('button')) {
+                                            const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
+                                            if (t === 'log in' || t === 'đăng nhập') {
+                                                b.click();
+                                                return { success: true, selector: 'text-match' };
+                                            }
+                                        }
+                                        return { success: false };
+                                    }''')
+                                    if res and res.get('success'):
+                                        login_clicked = True
+                                        self.background_log_signal.emit(f"🔑 [TikTok] Đã click nút 'Log in' ({res.get('selector')}) thành công!")
+                                        break
+                                except Exception:
+                                    pass
+                                target_tab.wait_for_timeout(800)
+
+                            if not login_clicked:
+                                try:
+                                    loc = target_tab.locator('#header-login-button, button[data-e2e="top-login-button"]').first
+                                    if loc.count() > 0:
+                                        loc.click(timeout=3000)
+                                        login_clicked = True
+                                        self.background_log_signal.emit("🔑 [TikTok] Đã click nút 'Log in' thành công!")
+                                except Exception:
+                                    pass
+
+                            if not login_clicked:
+                                self.background_log_signal.emit("ℹ️ [TikTok] Không thấy nút 'Log in' (có thể tài khoản đã đăng nhập sẵn).")
             except Exception as mute_err:
                 self.background_log_signal.emit(f"⚠️ [TikTok] Ghi chú mute site: {mute_err}")
 
