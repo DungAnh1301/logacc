@@ -3258,7 +3258,13 @@ class MainWindow(QWidget):
                     raise RuntimeError(f"Không tìm thấy và không thể tự động tạo profile: {profile_name}")
 
             response = requests.get(
-                f"{api_url}/profiles/start/{target['id']}", timeout=30
+                f"{api_url}/profiles/start/{target['id']}",
+                params={
+                    "addtional_args": "--mute-audio",
+                    "args": "--mute-audio",
+                    "custom_args": "--mute-audio"
+                },
+                timeout=30
             )
             response.raise_for_status()
             payload = response.json()
@@ -3309,76 +3315,62 @@ class MainWindow(QWidget):
                             target_tab = context.pages[-1]
 
                         if target_tab:
-                            # 1. Nhảy sang tab TikTok
+                            # 1. Nhảy sang tab TikTok và đặt kích thước chuẩn desktop
                             target_tab.bring_to_front()
+                            try:
+                                target_tab.set_viewport_size({"width": 1280, "height": 800})
+                            except Exception:
+                                pass
 
-                            # 2. Tiêm script Mute vĩnh viễn (chạy định kỳ 150ms và hook media)
+                            # 2. Tiêm script Mute vĩnh viễn (chạy định kỳ 100ms)
                             mute_script = '''() => {
-                                const silenceMedia = (el) => {
-                                    try {
-                                        el.muted = true;
-                                        el.volume = 0;
-                                        el.defaultMuted = true;
-                                    } catch (e) {}
-                                };
-
                                 window.__mute_tiktok = () => {
-                                    document.querySelectorAll('video, audio').forEach(silenceMedia);
-                                    // Bấm nút Mute trên player của TikTok nếu đang bật tiếng
                                     try {
-                                        const muteBtn = document.querySelector('[data-key-interaction="video_mute"] button, button[aria-label="Volume"], button[aria-label="Mute"]');
-                                        if (muteBtn) {
-                                            const isMuted = muteBtn.querySelector('path[d*="M29.3"]') || muteBtn.getAttribute('aria-pressed') === 'true';
-                                            if (!isMuted) {
-                                                muteBtn.click();
+                                        // A. Tắt tiếng tất cả các thẻ video và audio
+                                        document.querySelectorAll('video, audio').forEach(el => {
+                                            try {
+                                                el.muted = true;
+                                                el.volume = 0;
+                                                el.defaultMuted = true;
+                                            } catch (e) {}
+                                        });
+
+                                        // B. Click nút Mute của player TikTok nếu chưa mute
+                                        const volSelectors = [
+                                            '[data-key-interaction="video_mute"] button',
+                                            'button[aria-label="Volume"]',
+                                            '[data-key-interaction="video_mute"]',
+                                            'button[aria-label="Mute"]',
+                                            'div[class*="DivVolumeControlContainer"]'
+                                        ];
+                                        for (const s of volSelectors) {
+                                            const volEl = document.querySelector(s);
+                                            if (volEl) {
+                                                const isMuted = volEl.getAttribute('aria-pressed') === 'true' ||
+                                                                volEl.getAttribute('aria-label') === 'Muted' ||
+                                                                volEl.querySelector('path[d*="M29.3"]');
+                                                if (!isMuted) {
+                                                    volEl.click();
+                                                }
                                             }
+                                        }
+
+                                        // C. Suspend AudioContext
+                                        if (window.AudioContext) {
+                                            const orig = window.AudioContext;
+                                            window.AudioContext = function() {
+                                                const ctx = new orig();
+                                                try { ctx.suspend(); } catch (e) {}
+                                                return ctx;
+                                            };
                                         }
                                     } catch(e) {}
                                 };
 
                                 window.__mute_tiktok();
                                 if (!window.__mute_interval) {
-                                    window.__mute_interval = setInterval(window.__mute_tiktok, 150);
+                                    window.__mute_interval = setInterval(window.__mute_tiktok, 100);
                                 }
-
-                                try {
-                                    const origPlay = HTMLMediaElement.prototype.play;
-                                    HTMLMediaElement.prototype.play = function() {
-                                        silenceMedia(this);
-                                        return origPlay.apply(this, arguments);
-                                    };
-
-                                    Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
-                                        set: function(v) {},
-                                        get: function() { return true; },
-                                        configurable: true
-                                    });
-
-                                    Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
-                                        set: function(v) {},
-                                        get: function() { return 0; },
-                                        configurable: true
-                                    });
-                                } catch (e) {}
-
-                                try {
-                                    if (window.AudioContext) {
-                                        const origAudio = window.AudioContext;
-                                        window.AudioContext = function() {
-                                            const ctx = new origAudio();
-                                            try { ctx.suspend(); } catch (e) {}
-                                            return ctx;
-                                        };
-                                    }
-                                    if (window.webkitAudioContext) {
-                                        const origWebkit = window.webkitAudioContext;
-                                        window.webkitAudioContext = function() {
-                                            const ctx = new origWebkit();
-                                            try { ctx.suspend(); } catch (e) {}
-                                            return ctx;
-                                        };
-                                    }
-                                } catch (e) {}
                             }'''
 
                             # Đăng ký script mute cho tài liệu mới
@@ -3397,47 +3389,54 @@ class MainWindow(QWidget):
 
                             self.background_log_signal.emit("⏳ [TikTok] Đang đợi trang TikTok tải dữ liệu và giao diện hoàn tất...")
 
-                            # 3. CHỜ TRANG LOAD ĐẦY ĐỦ (Tối đa 40 giây)
+                            # 3. CHỜ TRANG LOAD ĐẦY ĐỦ (Tối đa 90 giây)
                             login_btn_found = False
                             already_logged_in = False
-                            for attempt in range(1, 41):
+                            for attempt in range(1, 91):
                                 # Tự động phát hiện và bấm đóng popup "Got it" / "Đã hiểu" / hướng dẫn nếu xuất hiện
                                 dismiss_tiktok_popups(target_tab, self.background_log_signal)
 
-                                # Thực thi ép mute mỗi giây
+                                # Thực thi ép mute mỗi giây và bấm phím tắt mute
                                 try:
                                     target_tab.evaluate("window.__mute_tiktok && window.__mute_tiktok()")
+                                    target_tab.keyboard.press("m")
                                 except Exception:
                                     pass
 
                                 # Kiểm tra xem nút Log in hoặc Profile hoặc Video đã xuất hiện chưa
                                 try:
                                     status_info = target_tab.evaluate('''() => {
-                                        // 1. Kiểm tra nút Log in
+                                        // 1. Kiểm tra nếu tài khoản đã đăng nhập sẵn
+                                        if (document.querySelector('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"]')) {
+                                            return { status: 'already_logged_in' };
+                                        }
+
+                                        // 2. Kiểm tra tất cả nút Log in (cả desktop header, sidebar hẹp, mobile/responsive)
                                         const loginSelectors = [
                                             '#header-login-button',
                                             'button[data-e2e="top-login-button"]',
                                             'button[aria-label="Log in"]',
+                                            'button[data-testid="tux-web-button"][aria-label="Log in"]',
                                             'div[data-testid="tux-web-button-container"] button',
-                                            'button[data-testid="tux-web-button"]'
+                                            'button[data-testid="tux-web-button"]',
+                                            'a[data-e2e="nav-profile"]',
+                                            'div[data-e2e="nav-profile"]',
+                                            'a[href*="/login"]'
                                         ];
                                         for (const s of loginSelectors) {
                                             const el = document.querySelector(s);
-                                            if (el && el.offsetParent !== null) {
+                                            if (el) {
                                                 return { status: 'found_login', selector: s };
                                             }
                                         }
-                                        for (const b of document.querySelectorAll('button')) {
+                                        for (const b of document.querySelectorAll('button, a, div[role="button"]')) {
                                             const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
-                                            if ((t === 'log in' || t === 'đăng nhập') && b.offsetParent !== null) {
+                                            if (t === 'log in' || t === 'đăng nhập' || t.includes('log in') || t.includes('đăng nhập')) {
                                                 return { status: 'found_login', selector: 'text-match' };
                                             }
                                         }
-                                        // 2. Kiểm tra nếu tài khoản đã đăng nhập sẵn
-                                        if (document.querySelector('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"]')) {
-                                            return { status: 'already_logged_in' };
-                                        }
-                                        // 3. Kiểm tra xem video feed đã nạp chưa
+
+                                        // 3. Kiểm tra xem video feed đã nạp chưa (Nếu video đã chạy -> trang chắc chắn đã tải xong!)
                                         if (document.querySelector('video, [data-e2e="feed-video"], .xgplayer-container')) {
                                             return { status: 'video_rendered' };
                                         }
@@ -3453,11 +3452,15 @@ class MainWindow(QWidget):
                                         already_logged_in = True
                                         self.background_log_signal.emit(f"ℹ️ [TikTok] Trang đã nạp xong (sau {attempt}s)! Tài khoản đã đăng nhập.")
                                         break
+                                    elif st == 'video_rendered':
+                                        login_btn_found = True
+                                        self.background_log_signal.emit(f"🎯 [TikTok] Trang video đã hiển thị (sau {attempt}s)! Đang tiến hành click 'Log in'...")
+                                        break
                                 except Exception:
                                     pass
 
-                                if attempt % 5 == 0:
-                                    self.background_log_signal.emit(f"⏳ [TikTok] Vẫn đang tải trang TikTok ({attempt}/40s)...")
+                                if attempt % 10 == 0:
+                                    self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi trang TikTok tải hoàn tất ({attempt}/90s)...")
 
                                 target_tab.wait_for_timeout(1000)
 
@@ -3467,31 +3470,48 @@ class MainWindow(QWidget):
                                 dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                 self.background_log_signal.emit("👆 [TikTok] Đang bấm vào nút 'Log in' để mở bảng đăng nhập...")
                                 clicked = False
-                                for c_try in range(3):
+                                for c_try in range(4):
+                                    # Thử click bằng JavaScript evaluate (hỗ trợ cả nút đang bị ẩn responsive)
                                     try:
-                                        # Click bằng Playwright locator
-                                        loc = target_tab.locator('#header-login-button, button[data-e2e="top-login-button"], button[aria-label="Log in"]').first
-                                        if loc.count() > 0:
-                                            loc.click(timeout=3000)
+                                        res_click = target_tab.evaluate('''() => {
+                                            const selectors = [
+                                                '#header-login-button',
+                                                'button[data-e2e="top-login-button"]',
+                                                'button[aria-label="Log in"]',
+                                                'button[data-testid="tux-web-button"][aria-label="Log in"]',
+                                                'div[data-testid="tux-web-button-container"] button',
+                                                'button[data-testid="tux-web-button"]',
+                                                'a[data-e2e="nav-profile"]',
+                                                'div[data-e2e="nav-profile"]',
+                                                'a[href*="/login"]'
+                                            ];
+                                            for (const s of selectors) {
+                                                const btn = document.querySelector(s);
+                                                if (btn) {
+                                                    btn.click();
+                                                    return true;
+                                                }
+                                            }
+                                            for (const b of document.querySelectorAll('button, a, div[role="button"]')) {
+                                                const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
+                                                if (t === 'log in' || t === 'đăng nhập' || t.includes('log in') || t.includes('đăng nhập')) {
+                                                    b.click();
+                                                    return true;
+                                                }
+                                            }
+                                            return false;
+                                        }''')
+                                        if res_click:
                                             clicked = True
                                             break
                                     except Exception:
                                         pass
 
+                                    # Click bằng Playwright locator
                                     try:
-                                        # Click bằng JavaScript evaluate
-                                        res_click = target_tab.evaluate('''() => {
-                                            const btn = document.querySelector('#header-login-button') ||
-                                                        document.querySelector('button[data-e2e="top-login-button"]') ||
-                                                        document.querySelector('button[aria-label="Log in"]') ||
-                                                        document.querySelector('div[data-testid="tux-web-button-container"] button');
-                                            if (btn) {
-                                                btn.click();
-                                                return true;
-                                            }
-                                            return false;
-                                        }''')
-                                        if res_click:
+                                        loc = target_tab.locator('#header-login-button, button[data-e2e="top-login-button"], button[aria-label="Log in"], button[data-testid="tux-web-button"]').first
+                                        if loc.count() > 0:
+                                            loc.click(force=True, timeout=3000)
                                             clicked = True
                                             break
                                     except Exception:
@@ -3503,12 +3523,18 @@ class MainWindow(QWidget):
                                     dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                     self.background_log_signal.emit("✅ [TikTok] ĐÃ CLICK NÚT 'LOG IN' THÀNH CÔNG! Bảng đăng nhập đã hiển thị.")
                                 else:
-                                    self.background_log_signal.emit("⚠️ [TikTok] Không thể click vào nút Log in.")
+                                    # Fallback cuối cùng: điều hướng thẳng đến /login
+                                    try:
+                                        self.background_log_signal.emit("🌐 [TikTok] Đang chuyển hướng trực tiếp sang trang đăng nhập tiktok.com/login...")
+                                        target_tab.goto("https://www.tiktok.com/login", wait_until="domcontentloaded", timeout=15000)
+                                        self.background_log_signal.emit("✅ [TikTok] Đã mở trang đăng nhập thành công.")
+                                    except Exception as nav_e:
+                                        self.background_log_signal.emit(f"⚠️ [TikTok] Không thể click vào nút Log in: {nav_e}")
                             elif already_logged_in:
                                 self.background_log_signal.emit("ℹ️ [TikTok] Tài khoản đã đăng nhập sẵn, không cần bấm 'Log in'.")
                             else:
                                 dismiss_tiktok_popups(target_tab, self.background_log_signal)
-                                self.background_log_signal.emit("⚠️ [TikTok] Hết thời gian chờ (40s) nhưng chưa thấy nút 'Log in'.")
+                                self.background_log_signal.emit("⚠️ [TikTok] Hết thời gian chờ (90s) nhưng chưa thấy nút 'Log in'.")
 
                             # 5. Tắt tiếng video lần cuối để tuyệt đối yên tĩnh
                             try:
