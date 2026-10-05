@@ -821,6 +821,14 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
         
         page = await context.new_page()
 
+        async def safe_page_content(pg, retries=5, delay=0.5):
+            for _ in range(retries):
+                try:
+                    return await pg.content()
+                except Exception:
+                    await asyncio.sleep(delay)
+            return ""
+
         try:
             # ==========================================
             # BƯỚC 1: NHẬP TÀI KHOẢN & BẤM NEXT
@@ -842,7 +850,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
             log_signal.emit(f"🔍 [Bước 2] Kiểm tra khung nhập mật khẩu...")
             for _ in range(8):
                 await asyncio.sleep(1)
-                content = await page.content()
+                content = await safe_page_content(page)
                 
                 # Nếu có nút "Use your password" hoặc ô pass trực tiếp thì thoát check
                 if "verify your email" in content.lower() or await page.get_by_role("button", name="Use your password").count() > 0:
@@ -861,7 +869,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     break
 
             # Xử lý nếu kẹt ở màn hình Verify your email có nút "Use your password"
-            content_check = await page.content()
+            content_check = await safe_page_content(page)
             if "verify your email" in content_check.lower() or await page.get_by_role("button", name="Use your password").count() > 0:
                 log_signal.emit(f"🛡️ Phát hiện màn hình xác thực, đang bấm 'Use your password'...")
                 try:
@@ -892,10 +900,9 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
             for _ in range(35):
                 await pause_event.wait()
                 await asyncio.sleep(1)
-                try:
-                    content = await page.content()
-                except:
-                    break
+                content = await safe_page_content(page)
+                if not content:
+                    continue
 
                 # Check nếu hiện màn hình lỗi "Something went wrong." của Microsoft
                 content_lower = content.lower()
@@ -954,7 +961,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
                         try:
-                            cur_c = (await page.content()).lower()
+                            cur_c = (await safe_page_content(page)).lower()
                             if (
                                 "something went wrong" in cur_c 
                                 or "we can't complete your request right now" in cur_c 
@@ -991,18 +998,15 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                                 if await page.is_visible("#codeEntry-0"):
                                     otp_appeared = True
                                     break
-                                try:
-                                    check_c = (await page.content()).lower()
-                                    if (
-                                        "something went wrong" in check_c 
-                                        or "we can't complete your request right now" in check_c 
-                                        or "try again later" in check_c 
-                                        or "there's a temporary problem" in check_c
-                                    ):
-                                        hit_sww = True
-                                        break
-                                except:
-                                    pass
+                                check_c = (await safe_page_content(page)).lower()
+                                if (
+                                    "something went wrong" in check_c 
+                                    or "we can't complete your request right now" in check_c 
+                                    or "try again later" in check_c 
+                                    or "there's a temporary problem" in check_c
+                                ):
+                                    hit_sww = True
+                                    break
                                 await asyncio.sleep(1)
 
                             if hit_sww:
@@ -1062,7 +1066,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
                         try:
-                            cur_c = (await page.content()).lower()
+                            cur_c = (await safe_page_content(page)).lower()
                             if (
                                 "something went wrong" in cur_c 
                                 or "we can't complete your request right now" in cur_c 
@@ -1087,18 +1091,15 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                                 if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
                                     otp_appeared = True
                                     break
-                                try:
-                                    check_c = (await page.content()).lower()
-                                    if (
-                                        "something went wrong" in check_c 
-                                        or "we can't complete your request right now" in check_c 
-                                        or "try again later" in check_c 
-                                        or "there's a temporary problem" in check_c
-                                    ):
-                                        hit_sww = True
-                                        break
-                                except:
-                                    pass
+                                check_c = (await safe_page_content(page)).lower()
+                                if (
+                                    "something went wrong" in check_c 
+                                    or "we can't complete your request right now" in check_c 
+                                    or "try again later" in check_c 
+                                    or "there's a temporary problem" in check_c
+                                ):
+                                    hit_sww = True
+                                    break
                                 await asyncio.sleep(1)
 
                             if hit_sww:
@@ -1157,7 +1158,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     await asyncio.sleep(0.5)
 
                     # Check nếu bị dính màn hình lỗi "Something went wrong"
-                    content_b4 = (await page.content()).lower()
+                    content_b4 = (await safe_page_content(page)).lower()
                     if (
                         "something went wrong" in content_b4 
                         or "we can't complete your request right now" in content_b4 
@@ -3170,7 +3171,7 @@ class MainWindow(QWidget):
                 f"✅ Đã mở profile {profile_name} và vào tiktok.com thành công."
             )
 
-            # Nhảy sang tab TikTok này và tắt tiếng toàn bộ trang (Mute site)
+            # Nhảy sang tab TikTok này, đợi tải hoàn tất, TẮT TIẾNG (Mute site) và CLICK VÀO NÚT 'LOG IN'
             try:
                 patch_playwright_driver()
                 from playwright.sync_api import sync_playwright
@@ -3191,16 +3192,34 @@ class MainWindow(QWidget):
                             # 1. Nhảy sang tab TikTok
                             target_tab.bring_to_front()
 
-                            # 2. Tắt tiếng tự động toàn diện cho trang (Mute site)
+                            # 2. Tiêm script Mute vĩnh viễn (chạy định kỳ 150ms và hook media)
                             mute_script = '''() => {
                                 const silenceMedia = (el) => {
                                     try {
                                         el.muted = true;
                                         el.volume = 0;
+                                        el.defaultMuted = true;
                                     } catch (e) {}
                                 };
 
-                                document.querySelectorAll('video, audio').forEach(silenceMedia);
+                                window.__mute_tiktok = () => {
+                                    document.querySelectorAll('video, audio').forEach(silenceMedia);
+                                    // Bấm nút Mute trên player của TikTok nếu đang bật tiếng
+                                    try {
+                                        const muteBtn = document.querySelector('[data-key-interaction="video_mute"] button, button[aria-label="Volume"], button[aria-label="Mute"]');
+                                        if (muteBtn) {
+                                            const isMuted = muteBtn.querySelector('path[d*="M29.3"]') || muteBtn.getAttribute('aria-pressed') === 'true';
+                                            if (!isMuted) {
+                                                muteBtn.click();
+                                            }
+                                        }
+                                    } catch(e) {}
+                                };
+
+                                window.__mute_tiktok();
+                                if (!window.__mute_interval) {
+                                    window.__mute_interval = setInterval(window.__mute_tiktok, 150);
+                                }
 
                                 try {
                                     const origPlay = HTMLMediaElement.prototype.play;
@@ -3240,17 +3259,9 @@ class MainWindow(QWidget):
                                         };
                                     }
                                 } catch (e) {}
-
-                                try {
-                                    const obs = new MutationObserver(() => {
-                                        document.querySelectorAll('video, audio').forEach(silenceMedia);
-                                    });
-                                    obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
-                                } catch (e) {}
                             }'''
 
-                            target_tab.evaluate(mute_script)
-
+                            # Đăng ký script mute cho tài liệu mới
                             try:
                                 cdp_sess = context.new_cdp_session(target_tab)
                                 cdp_sess.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -3259,57 +3270,126 @@ class MainWindow(QWidget):
                             except Exception:
                                 pass
 
-                            self.background_log_signal.emit("🔇 [TikTok] Đã nhảy sang tab TikTok và TẮT TIẾNG (Mute site) thành công.")
+                            try:
+                                target_tab.evaluate(mute_script)
+                            except Exception:
+                                pass
 
-                            # 3. Tự động bấm nút Login (Log in) nếu chưa đăng nhập
-                            self.background_log_signal.emit("🔍 [TikTok] Đang kiểm tra nút 'Log in'...")
-                            login_clicked = False
-                            for _ in range(6):
+                            self.background_log_signal.emit("⏳ [TikTok] Đang đợi trang TikTok tải dữ liệu và giao diện hoàn tất...")
+
+                            # 3. CHỜ TRANG LOAD ĐẦY ĐỦ (Tối đa 40 giây)
+                            login_btn_found = False
+                            already_logged_in = False
+                            for attempt in range(1, 41):
+                                # Thực thi ép mute mỗi giây
                                 try:
-                                    res = target_tab.evaluate('''() => {
-                                        const selectors = [
+                                    target_tab.evaluate("window.__mute_tiktok && window.__mute_tiktok()")
+                                except Exception:
+                                    pass
+
+                                # Kiểm tra xem nút Log in hoặc Profile hoặc Video đã xuất hiện chưa
+                                try:
+                                    status_info = target_tab.evaluate('''() => {
+                                        // 1. Kiểm tra nút Log in
+                                        const loginSelectors = [
                                             '#header-login-button',
                                             'button[data-e2e="top-login-button"]',
                                             'button[aria-label="Log in"]',
                                             'div[data-testid="tux-web-button-container"] button',
                                             'button[data-testid="tux-web-button"]'
                                         ];
-                                        for (const s of selectors) {
+                                        for (const s of loginSelectors) {
                                             const el = document.querySelector(s);
-                                            if (el) {
-                                                el.click();
-                                                return { success: true, selector: s };
+                                            if (el && el.offsetParent !== null) {
+                                                return { status: 'found_login', selector: s };
                                             }
                                         }
                                         for (const b of document.querySelectorAll('button')) {
                                             const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
-                                            if (t === 'log in' || t === 'đăng nhập') {
-                                                b.click();
-                                                return { success: true, selector: 'text-match' };
+                                            if ((t === 'log in' || t === 'đăng nhập') && b.offsetParent !== null) {
+                                                return { status: 'found_login', selector: 'text-match' };
                                             }
                                         }
-                                        return { success: false };
+                                        // 2. Kiểm tra nếu tài khoản đã đăng nhập sẵn
+                                        if (document.querySelector('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"]')) {
+                                            return { status: 'already_logged_in' };
+                                        }
+                                        // 3. Kiểm tra xem video feed đã nạp chưa
+                                        if (document.querySelector('video, [data-e2e="feed-video"], .xgplayer-container')) {
+                                            return { status: 'video_rendered' };
+                                        }
+                                        return { status: 'loading' };
                                     }''')
-                                    if res and res.get('success'):
-                                        login_clicked = True
-                                        self.background_log_signal.emit(f"🔑 [TikTok] Đã click nút 'Log in' ({res.get('selector')}) thành công!")
+
+                                    st = status_info.get('status') if isinstance(status_info, dict) else 'loading'
+                                    if st == 'found_login':
+                                        login_btn_found = True
+                                        self.background_log_signal.emit(f"🎯 [TikTok] Trang đã nạp xong (sau {attempt}s)! Đã tìm thấy nút 'Log in'.")
+                                        break
+                                    elif st == 'already_logged_in':
+                                        already_logged_in = True
+                                        self.background_log_signal.emit(f"ℹ️ [TikTok] Trang đã nạp xong (sau {attempt}s)! Tài khoản đã đăng nhập.")
                                         break
                                 except Exception:
                                     pass
-                                target_tab.wait_for_timeout(800)
 
-                            if not login_clicked:
-                                try:
-                                    loc = target_tab.locator('#header-login-button, button[data-e2e="top-login-button"]').first
-                                    if loc.count() > 0:
-                                        loc.click(timeout=3000)
-                                        login_clicked = True
-                                        self.background_log_signal.emit("🔑 [TikTok] Đã click nút 'Log in' thành công!")
-                                except Exception:
-                                    pass
+                                if attempt % 5 == 0:
+                                    self.background_log_signal.emit(f"⏳ [TikTok] Vẫn đang tải trang TikTok ({attempt}/40s)...")
 
-                            if not login_clicked:
-                                self.background_log_signal.emit("ℹ️ [TikTok] Không thấy nút 'Log in' (có thể tài khoản đã đăng nhập sẵn).")
+                                target_tab.wait_for_timeout(1000)
+
+                            # 4. BẤM VÀO NÚT 'LOG IN'
+                            if login_btn_found:
+                                self.background_log_signal.emit("👆 [TikTok] Đang bấm vào nút 'Log in' để mở bảng đăng nhập...")
+                                clicked = False
+                                for c_try in range(3):
+                                    try:
+                                        # Click bằng Playwright locator
+                                        loc = target_tab.locator('#header-login-button, button[data-e2e="top-login-button"], button[aria-label="Log in"]').first
+                                        if loc.count() > 0:
+                                            loc.click(timeout=3000)
+                                            clicked = True
+                                            break
+                                    except Exception:
+                                        pass
+
+                                    try:
+                                        # Click bằng JavaScript evaluate
+                                        res_click = target_tab.evaluate('''() => {
+                                            const btn = document.querySelector('#header-login-button') ||
+                                                        document.querySelector('button[data-e2e="top-login-button"]') ||
+                                                        document.querySelector('button[aria-label="Log in"]') ||
+                                                        document.querySelector('div[data-testid="tux-web-button-container"] button');
+                                            if (btn) {
+                                                btn.click();
+                                                return true;
+                                            }
+                                            return false;
+                                        }''')
+                                        if res_click:
+                                            clicked = True
+                                            break
+                                    except Exception:
+                                        pass
+                                    target_tab.wait_for_timeout(800)
+
+                                if clicked:
+                                    target_tab.wait_for_timeout(2000)
+                                    self.background_log_signal.emit("✅ [TikTok] ĐÃ CLICK NÚT 'LOG IN' THÀNH CÔNG! Bảng đăng nhập đã hiển thị.")
+                                else:
+                                    self.background_log_signal.emit("⚠️ [TikTok] Không thể click vào nút Log in.")
+                            elif already_logged_in:
+                                self.background_log_signal.emit("ℹ️ [TikTok] Tài khoản đã đăng nhập sẵn, không cần bấm 'Log in'.")
+                            else:
+                                self.background_log_signal.emit("⚠️ [TikTok] Hết thời gian chờ (40s) nhưng chưa thấy nút 'Log in'.")
+
+                            # 5. Tắt tiếng video lần cuối để tuyệt đối yên tĩnh
+                            try:
+                                target_tab.evaluate("window.__mute_tiktok && window.__mute_tiktok()")
+                                target_tab.keyboard.press("m")
+                            except Exception:
+                                pass
+                            self.background_log_signal.emit("🔇 [TikTok] Đã tắt tiếng hoàn toàn (Mute site).")
             except Exception as mute_err:
                 self.background_log_signal.emit(f"⚠️ [TikTok] Ghi chú mute site: {mute_err}")
 
