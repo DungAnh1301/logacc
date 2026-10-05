@@ -3411,15 +3411,17 @@ class MainWindow(QWidget):
                         except Exception:
                             pass
 
-                        # 4. BẬT TRANG TIKTOK KHI ĐÃ CÀI ĐẶT TẮT TIẾNG TỪ TRƯỚC
-                        self.background_log_signal.emit("🔇 [TikTok] Đã kích hoạt chế độ Tắt tiếng (Mute) ngay từ đầu. Đang nạp tiktok.com...")
-                        if "tiktok.com" not in target_tab.url:
-                            target_tab.goto("https://www.tiktok.com/", wait_until="domcontentloaded", timeout=60000)
+                        # 4. MỞ TRỰC TIẾP TRANG QR CODE CỦA TIKTOK KHI ĐÃ CÀI ĐẶT TẮT TIẾNG TỪ ĐẦU
+                        self.background_log_signal.emit("🔇 [TikTok] Đã kích hoạt chế độ Tắt tiếng (Mute) ngay từ đầu. Đang nạp trực tiếp https://www.tiktok.com/login/qrcode...")
+                        try:
+                            target_tab.goto("https://www.tiktok.com/login/qrcode", wait_until="domcontentloaded", timeout=60000)
+                        except Exception as goto_err:
+                            self.background_log_signal.emit(f"⚠️ [TikTok] Ghi chú nạp URL: {goto_err}")
 
-                        self.background_log_signal.emit("⏳ [TikTok] Đang đợi trang TikTok tải dữ liệu và giao diện hoàn tất...")
+                        self.background_log_signal.emit("⏳ [TikTok] Đang đợi trang đăng nhập mã QR tải hoàn tất...")
 
-                        # 5. CHỜ TRANG LOAD ĐẦY ĐỦ (Tối đa 90 giây)
-                        login_btn_found = False
+                        # 5. CHỜ TRANG LOAD ĐẦY ĐỦ VÀ HIỂN THỊ MÃ QR (Tối đa 90 giây)
+                        qr_ready = False
                         already_logged_in = False
                         for attempt in range(1, 91):
                             # Tự động phát hiện và bấm đóng popup "Got it" / "Đã hiểu" / hướng dẫn nếu xuất hiện
@@ -3432,7 +3434,7 @@ class MainWindow(QWidget):
                             except Exception:
                                 pass
 
-                            # Kiểm tra xem nút Log in hoặc Profile hoặc Video đã xuất hiện chưa
+                            # Kiểm tra xem mã QR hoặc nút bấm đã xuất hiện chưa
                             try:
                                 status_info = target_tab.evaluate('''() => {
                                     // 1. Kiểm tra nếu tài khoản đã đăng nhập sẵn
@@ -3440,184 +3442,63 @@ class MainWindow(QWidget):
                                         return { status: 'already_logged_in' };
                                     }
 
-                                    // 2. Kiểm tra tất cả nút Log in (cả desktop header, sidebar hẹp, mobile/responsive)
-                                    const loginSelectors = [
-                                        '#header-login-button',
-                                        'button[data-e2e="top-login-button"]',
-                                        'button[aria-label="Log in"]',
-                                        'button[data-testid="tux-web-button"][aria-label="Log in"]',
-                                        'div[data-testid="tux-web-button-container"] button',
-                                        'button[data-testid="tux-web-button"]',
-                                        'a[data-e2e="nav-profile"]',
-                                        'div[data-e2e="nav-profile"]',
-                                        'a[href*="/login"]'
-                                    ];
-                                    for (const s of loginSelectors) {
-                                        const el = document.querySelector(s);
-                                        if (el) {
-                                            return { status: 'found_login', selector: s };
-                                        }
+                                    // 2. Kiểm tra xem mã QR đã render trên trang chưa (canvas, img, qrcode)
+                                    if (document.querySelector('canvas, [data-e2e="qr-code"], img[alt*="qr"], div[class*="qrcode"], div[class*="QRCode"]')) {
+                                        return { status: 'qr_ready' };
                                     }
-                                    for (const b of document.querySelectorAll('button, a, div[role="button"]')) {
-                                        const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
-                                        if (t === 'log in' || t === 'đăng nhập' || t.includes('log in') || t.includes('đăng nhập')) {
-                                            return { status: 'found_login', selector: 'text-match' };
+
+                                    // 3. Nếu đang ở trang chọn phương thức đăng nhập -> Tự click vào Use QR code
+                                    const items = Array.from(document.querySelectorAll('div[data-e2e="channel-item"], div[role="link"], a, [class*="DivBoxContainer"], [class*="channel-item"]'));
+                                    for (const item of items) {
+                                        const txt = (item.innerText || item.textContent || '').trim().toLowerCase();
+                                        if (txt.includes('use qr code') || txt.includes('qr code') || txt.includes('mã qr')) {
+                                            item.click();
+                                            return { status: 'clicked_qr_option' };
                                         }
                                     }
 
-                                    // 3. Kiểm tra xem video feed đã nạp chưa (Nếu video đã chạy -> trang chắc chắn đã tải xong!)
-                                    if (document.querySelector('video, [data-e2e="feed-video"], .xgplayer-container')) {
-                                        return { status: 'video_rendered' };
+                                    // 4. Kiểm tra nút Log in nếu đang ở trang chủ (chưa vào login)
+                                    const loginBtn = document.querySelector('#header-login-button, button[data-e2e="top-login-button"], button[aria-label="Log in"]');
+                                    if (loginBtn) {
+                                        loginBtn.click();
+                                        return { status: 'clicked_login' };
                                     }
+
                                     return { status: 'loading' };
                                 }''')
 
                                 st = status_info.get('status') if isinstance(status_info, dict) else 'loading'
-                                if st == 'found_login':
-                                    login_btn_found = True
-                                    self.background_log_signal.emit(f"🎯 [TikTok] Trang đã nạp xong (sau {attempt}s)! Đã tìm thấy nút 'Log in'.")
-                                    break
-                                elif st == 'already_logged_in':
+                                if st == 'already_logged_in':
                                     already_logged_in = True
-                                    self.background_log_signal.emit(f"ℹ️ [TikTok] Trang đã nạp xong (sau {attempt}s)! Tài khoản đã đăng nhập.")
+                                    self.background_log_signal.emit(f"ℹ️ [TikTok] Trang đã nạp xong (sau {attempt}s)! Tài khoản đã đăng nhập sẵn.")
                                     break
-                                elif st == 'video_rendered':
-                                    login_btn_found = True
-                                    self.background_log_signal.emit(f"🎯 [TikTok] Trang video đã hiển thị (sau {attempt}s)! Đang tiến hành click 'Log in'...")
+                                elif st == 'qr_ready':
+                                    qr_ready = True
+                                    self.background_log_signal.emit(f"🎯 [TikTok] Đã hiển thị mã QR thành công (sau {attempt}s)! Sẵn sàng để bạn quét đăng nhập.")
                                     break
+                                elif st == 'clicked_qr_option':
+                                    self.background_log_signal.emit(f"📲 [TikTok] Đã tự động chọn mục 'Use QR code', đang chờ mã QR hiển thị...")
+                                elif st == 'clicked_login':
+                                    self.background_log_signal.emit(f"👆 [TikTok] Đã bấm nút 'Log in', đang chuyển vào giao diện quét mã QR...")
                             except Exception:
                                 pass
 
                             if attempt % 10 == 0:
-                                self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi trang TikTok tải hoàn tất ({attempt}/90s)...")
+                                self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi mã QR xuất hiện ({attempt}/90s)...")
 
                             target_tab.wait_for_timeout(1000)
 
-                        # 6. BẤM VÀO NÚT 'LOG IN'
-                        if login_btn_found:
+                        if qr_ready:
+                            target_tab.wait_for_timeout(1000)
                             dismiss_tiktok_popups(target_tab, self.background_log_signal)
-                            self.background_log_signal.emit("👆 [TikTok] Đang bấm vào nút 'Log in' để mở bảng đăng nhập...")
-                            clicked = False
-                            for c_try in range(4):
-                                # Click bằng JavaScript evaluate (hỗ trợ cả nút đang bị ẩn responsive)
-                                try:
-                                    res_click = target_tab.evaluate('''() => {
-                                        const selectors = [
-                                            '#header-login-button',
-                                            'button[data-e2e="top-login-button"]',
-                                            'button[aria-label="Log in"]',
-                                            'button[data-testid="tux-web-button"][aria-label="Log in"]',
-                                            'div[data-testid="tux-web-button-container"] button',
-                                            'button[data-testid="tux-web-button"]',
-                                            'a[data-e2e="nav-profile"]',
-                                            'div[data-e2e="nav-profile"]',
-                                            'a[href*="/login"]'
-                                        ];
-                                        for (const s of selectors) {
-                                            const btn = document.querySelector(s);
-                                            if (btn) {
-                                                btn.click();
-                                                return true;
-                                            }
-                                        }
-                                        for (const b of document.querySelectorAll('button, a, div[role="button"]')) {
-                                            const t = (b.innerText || b.getAttribute('aria-label') || '').trim().toLowerCase();
-                                            if (t === 'log in' || t === 'đăng nhập' || t.includes('log in') || t.includes('đăng nhập')) {
-                                                b.click();
-                                                return true;
-                                            }
-                                        }
-                                        return false;
-                                    }''')
-                                    if res_click:
-                                        clicked = True
-                                        break
-                                except Exception:
-                                    pass
-
-                                # Click bằng Playwright locator
-                                try:
-                                    loc = target_tab.locator('#header-login-button, button[data-e2e="top-login-button"], button[aria-label="Log in"], button[data-testid="tux-web-button"]').first
-                                    if loc.count() > 0:
-                                        loc.click(force=True, timeout=3000)
-                                        clicked = True
-                                        break
-                                except Exception:
-                                    pass
-                                target_tab.wait_for_timeout(800)
-
-                            if clicked:
-                                target_tab.wait_for_timeout(2000)
-                                dismiss_tiktok_popups(target_tab, self.background_log_signal)
-                                self.background_log_signal.emit("✅ [TikTok] ĐÃ CLICK NÚT 'LOG IN' THÀNH CÔNG! Bảng đăng nhập đã hiển thị.")
-
-                                # 7. TỰ ĐỘNG BẤM TIẾP VÀO 'USE QR CODE'
-                                self.background_log_signal.emit("📲 [TikTok] Đang tự động tìm và click vào 'Use QR code'...")
-                                qr_clicked = False
-                                for qr_attempt in range(1, 15):
-                                    dismiss_tiktok_popups(target_tab, self.background_log_signal)
-                                    # Kiểm tra xem mã QR đã hiển thị chưa
-                                    try:
-                                        already_qr = target_tab.evaluate('''() => {
-                                            return !!document.querySelector('canvas, [data-e2e="qr-code"], img[alt*="qr"], div[class*="qrcode"], div[class*="QRCode"]');
-                                        }''')
-                                        if already_qr:
-                                            qr_clicked = True
-                                            self.background_log_signal.emit("🎯 [TikTok] Mã QR đã hiển thị sẵn trên màn hình!")
-                                            break
-                                    except Exception:
-                                        pass
-
-                                    # Click vào phần tử Use QR code theo data-e2e="channel-item" và nội dung text
-                                    try:
-                                        res_qr = target_tab.evaluate('''() => {
-                                            const items = Array.from(document.querySelectorAll('div[data-e2e="channel-item"], div[role="link"], a, [class*="DivBoxContainer"], [class*="channel-item"]'));
-                                            for (const item of items) {
-                                                const txt = (item.innerText || item.textContent || '').trim().toLowerCase();
-                                                if (txt.includes('use qr code') || txt.includes('qr code') || txt.includes('mã qr')) {
-                                                    item.click();
-                                                    return true;
-                                                }
-                                            }
-                                            return false;
-                                        }''')
-                                        if res_qr:
-                                            qr_clicked = True
-                                            break
-                                    except Exception:
-                                        pass
-
-                                    try:
-                                        loc_qr = target_tab.locator('[data-e2e="channel-item"]:has-text("Use QR code"), div[role="link"]:has-text("Use QR code"), div:has-text("Use QR code")').first
-                                        if loc_qr.count() > 0:
-                                            loc_qr.click(timeout=2000)
-                                            qr_clicked = True
-                                            break
-                                    except Exception:
-                                        pass
-
-                                    target_tab.wait_for_timeout(800)
-
-                                if qr_clicked:
-                                    target_tab.wait_for_timeout(1500)
-                                    self.background_log_signal.emit("✅ [TikTok] ĐÃ BẤM 'USE QR CODE' THÀNH CÔNG! Mã QR đã hiển thị để bạn quét đăng nhập.")
-                                else:
-                                    self.background_log_signal.emit("⚠️ [TikTok] Chưa tìm thấy mục 'Use QR code', bạn có thể chọn trực tiếp trên màn hình.")
-                            else:
-                                # Fallback cuối cùng: điều hướng thẳng đến /login
-                                try:
-                                    self.background_log_signal.emit("🌐 [TikTok] Đang chuyển hướng trực tiếp sang trang đăng nhập tiktok.com/login...")
-                                    target_tab.goto("https://www.tiktok.com/login", wait_until="domcontentloaded", timeout=15000)
-                                    self.background_log_signal.emit("✅ [TikTok] Đã mở trang đăng nhập thành công.")
-                                except Exception as nav_e:
-                                    self.background_log_signal.emit(f"⚠️ [TikTok] Không thể click vào nút Log in: {nav_e}")
+                            self.background_log_signal.emit("✅ [TikTok] ĐÃ MỞ MÃ QR THÀNH CÔNG! Bạn có thể đưa điện thoại vào quét ngay.")
                         elif already_logged_in:
-                            self.background_log_signal.emit("ℹ️ [TikTok] Tài khoản đã đăng nhập sẵn, không cần bấm 'Log in'.")
+                            self.background_log_signal.emit("ℹ️ [TikTok] Tài khoản đã đăng nhập sẵn, không cần quét mã QR.")
                         else:
                             dismiss_tiktok_popups(target_tab, self.background_log_signal)
-                            self.background_log_signal.emit("⚠️ [TikTok] Hết thời gian chờ (90s) nhưng chưa thấy nút 'Log in'.")
+                            self.background_log_signal.emit("⚠️ [TikTok] Hết thời gian chờ (90s) nhưng chưa thấy mã QR. Bạn có thể kiểm tra trực tiếp trên trình duyệt.")
 
-                        # 8. Tắt tiếng video lần cuối để tuyệt đối yên tĩnh
+                        # 6. Tắt tiếng video lần cuối để tuyệt đối yên tĩnh
                         try:
                             target_tab.evaluate("window.__mute_tiktok && window.__mute_tiktok()")
                             target_tab.keyboard.press("m")
