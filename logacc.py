@@ -1,6 +1,7 @@
 import requests
 import sys
 import os
+import json
 import time
 import re
 import urllib.parse
@@ -507,24 +508,61 @@ def load_gui_config():
         GUI_CONFIG_FILE,
         os.path.join(APP_DIR, "gui_config.json"),
         os.path.join(APP_DIR, "dist", "gui_config.json"),
+        os.path.join(os.path.dirname(APP_DIR), "gui_config.json"),
         r"E:\Outh2 hotmail\gui_config.json",
         r"E:\Outh2 hotmail\dist\gui_config.json",
+        r"E:\Outh2 hotmail\release\gui_config.json",
     ]
     for p in candidate_paths:
         if p and os.path.isfile(p):
             try:
-                with open(p, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                if os.path.getsize(p) > 2:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, dict) and data:
+                            return data
             except Exception:
                 pass
     return {}
 
 def save_gui_config(cfg_dict):
-    try:
-        with open(GUI_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg_dict, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    if not isinstance(cfg_dict, dict):
+        return
+    candidate_paths = [
+        GUI_CONFIG_FILE,
+        os.path.join(APP_DIR, "gui_config.json"),
+        os.path.join(APP_DIR, "dist", "gui_config.json"),
+        os.path.join(os.path.dirname(APP_DIR), "gui_config.json"),
+        r"E:\Outh2 hotmail\gui_config.json",
+        r"E:\Outh2 hotmail\dist\gui_config.json",
+        r"E:\Outh2 hotmail\release\gui_config.json",
+    ]
+    target_files = set()
+    for p in candidate_paths:
+        if p and os.path.exists(os.path.dirname(p)):
+            target_files.add(os.path.abspath(p))
+
+    content = json.dumps(cfg_dict, ensure_ascii=False, indent=2)
+    for fpath in target_files:
+        try:
+            temp_path = fpath + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            if os.path.exists(fpath):
+                os.replace(temp_path, fpath)
+            else:
+                os.rename(temp_path, fpath)
+        except Exception:
+            try:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception:
+                pass
 
 def load_recovery_emails():
     candidate_paths = [
@@ -2371,8 +2409,8 @@ class MainWindow(QWidget):
         # Ô 3: Tên profile GPM cần mở sau khi VPN đã kết nối thành công
         gpm_layout = QHBoxLayout()
         self.gpm_profile_input = QLineEdit()
-        self.gpm_profile_input.setPlaceholderText("Ví dụ: US-45-1")
-        self.gpm_profile_input.setText("US-45-1")
+        self.gpm_profile_input.setPlaceholderText("Ví dụ: SA-75-1")
+        self.gpm_profile_input.setText("")
         self.gpm_profile_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 8px; border-radius: 4px; color: #ffcc80;")
         
         self.btn_bulk_create_gpm = QPushButton("⚡ Tạo Profile Auto")
@@ -2548,25 +2586,40 @@ class MainWindow(QWidget):
 
     def load_settings_to_gui(self):
         cfg = load_gui_config()
-        if not cfg:
-            return
-        if "acc_input" in cfg and cfg["acc_input"]:
-            self.acc_input.setText(cfg["acc_input"])
-        if "gpm_profile" in cfg and cfg["gpm_profile"]:
-            self.gpm_profile_input.setText(cfg["gpm_profile"])
-        if "gpm_api" in cfg and cfg["gpm_api"]:
-            self.gpm_api_input.setText(cfg["gpm_api"])
-        if "cb_change_nickname" in cfg:
-            self.cb_change_nickname.setChecked(bool(cfg["cb_change_nickname"]))
-        if "cb_change_avatar" in cfg:
-            self.cb_change_avatar.setChecked(bool(cfg["cb_change_avatar"]))
-        if "recovery_email" in cfg and cfg["recovery_email"]:
-            rec = cfg["recovery_email"]
-            idx = self.recovery_combo.findText(rec)
-            if idx >= 0:
-                self.recovery_combo.setCurrentIndex(idx)
-            else:
-                self.recovery_combo.setEditText(rec)
+        if cfg:
+            if "acc_input" in cfg and cfg["acc_input"]:
+                self.acc_input.setText(cfg["acc_input"])
+            if "gpm_profile" in cfg and cfg["gpm_profile"]:
+                saved_p = str(cfg["gpm_profile"]).strip()
+                if saved_p and saved_p != "US-45-1":
+                    self.gpm_profile_input.setText(saved_p)
+            if "gpm_api" in cfg and cfg["gpm_api"]:
+                self.gpm_api_input.setText(cfg["gpm_api"])
+            if "cb_change_nickname" in cfg:
+                self.cb_change_nickname.setChecked(bool(cfg["cb_change_nickname"]))
+            if "cb_change_avatar" in cfg:
+                self.cb_change_avatar.setChecked(bool(cfg["cb_change_avatar"]))
+            if "recovery_email" in cfg and cfg["recovery_email"]:
+                rec = cfg["recovery_email"]
+                idx = self.recovery_combo.findText(rec)
+                if idx >= 0:
+                    self.recovery_combo.setCurrentIndex(idx)
+                else:
+                    self.recovery_combo.setEditText(rec)
+
+        # Nếu Profile GPM vẫn đang trống, tự động nhận diện profile có sẵn từ GPM API
+        if not self.gpm_profile_input.text().strip():
+            try:
+                api_url = self.gpm_api_input.text().strip() or "http://127.0.0.1:13600/api/v3"
+                resp = requests.get(f"{api_url}/profiles", timeout=1.5)
+                if resp.status_code == 200:
+                    p_data = resp.json().get("data", [])
+                    if p_data and isinstance(p_data, list):
+                        first_prof = p_data[0].get("name")
+                        if first_prof:
+                            self.gpm_profile_input.setText(first_prof)
+            except Exception:
+                pass
 
     def save_settings_from_gui(self, *args):
         try:
@@ -3481,7 +3534,7 @@ class MainWindow(QWidget):
         profile_name = self.gpm_profile_input.text().strip()
         api_url = self.gpm_api_input.text().strip()
         if not profile_name:
-            self.log_output.append("⚠️ Vui lòng nhập tên profile GPM, ví dụ US-45-1.")
+            self.log_output.append("⚠️ Vui lòng nhập tên profile GPM, ví dụ SA-75-1.")
             return
         if not api_url:
             self.log_output.append("⚠️ Vui lòng nhập địa chỉ GPM Local API.")
@@ -3506,7 +3559,7 @@ class MainWindow(QWidget):
             profile_name = self.gpm_profile_input.text().strip()
             api_url = self.gpm_api_input.text().strip()
             if not profile_name:
-                self.log_output.append("⚠️ Vui lòng nhập tên profile GPM, ví dụ US-45-1.")
+                self.log_output.append("⚠️ Vui lòng nhập tên profile GPM, ví dụ SA-75-1.")
                 return
             if not api_url:
                 self.log_output.append("⚠️ Vui lòng nhập địa chỉ GPM Local API.")
@@ -3585,12 +3638,14 @@ class MainWindow(QWidget):
             self.log_output.append(f"❌ [Lỗi giao diện]: {str(err)}")
 
     def advance_gpm_profile(self):
-        """US-45-1 ... US-45-5 -> US-46-1; luôn đọc giá trị hiện tại trên GUI."""
+        """Ví dụ SA-75-1 ... SA-75-5 -> SA-76-1; luôn đọc giá trị hiện tại trên GUI."""
         current = self.gpm_profile_input.text().strip()
+        if not current:
+            return
         match = re.fullmatch(r"(.+)-(\d+)-(\d+)", current)
         if not match:
             self.log_output.append(
-                f"⚠️ Không tăng profile '{current}': cần định dạng như US-45-1."
+                f"⚠️ Không tăng profile '{current}': cần định dạng như SA-75-1."
             )
             return
 
