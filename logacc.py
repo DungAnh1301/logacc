@@ -2993,141 +2993,141 @@ class MainWindow(QWidget):
                     # =========================================================================
                     if chosen_avatar and os.path.isfile(chosen_avatar):
                         abs_avatar = os.path.abspath(chosen_avatar)
-                        self.background_log_signal.emit(f"🖼️ [Phần 1: Thay Avatar] Bắt đầu tải ảnh đại diện: '{os.path.basename(abs_avatar)}'...")
-                        
-                        if open_edit_dialog("thay đổi Avatar"):
+
+                        def perform_avatar_upload(attempt_num=1):
+                            self.background_log_signal.emit(f"🖼️ [Phần 1: Thay Avatar] Bắt đầu tải ảnh đại diện: '{os.path.basename(abs_avatar)}' (Lần thử {attempt_num}/2)...")
+                            
+                            if not open_edit_dialog("thay đổi Avatar"):
+                                self.background_log_signal.emit("⚠️ [TikTok] Không thể mở hộp thoại 'Edit profile' để đổi Avatar.")
+                                return False
+
                             file_input = target_page.locator('div[data-e2e="edit-profile-popup"] input[type="file"], input[type="file"]')
                             for _ in range(8):
                                 if file_input.count() > 0:
                                     break
                                 target_page.wait_for_timeout(500)
 
-                            if file_input.count() > 0:
-                                try:
-                                    file_input.first.set_input_files(abs_avatar, timeout=7000)
-                                    self.background_log_signal.emit("✅ [TikTok] Đã chọn file ảnh thành công! Đang chờ popup cắt ảnh...")
-                                    target_page.wait_for_timeout(2500)
+                            if file_input.count() == 0:
+                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô input[type='file'] để nạp avatar.")
+                                return False
 
-                                    # Tìm và bấm nút Apply của modal cắt ảnh HOÀN TOÀN BẰNG CẤU TRÚC HTML DOM THUẦN TÚY (chống bấm nhầm vào popup shop)
-                                    self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh) qua cấu trúc HTML DOM...")
-                                    clicked_apply = False
-                                    for apply_try in range(1, 10):
-                                        dismiss_tiktok_popups(target_page, self.background_log_signal)
-                                        try:
-                                            res_apply = target_page.evaluate('''() => {
-                                                // 1. Dò tìm chính xác container của modal cắt ảnh (chứa component zoom/transform)
-                                                const cropperComp = document.querySelector('.react-transform-component, [class*="cropper"], [class*="Cropper"], [class*="zoom-slider"]');
-                                                let cropperDialog = null;
-                                                if (cropperComp) {
-                                                    cropperDialog = cropperComp.closest('div[role="dialog"], [class*="modal"], [class*="Modal"], div[class*="dialog"]') || cropperComp.parentElement;
-                                                }
-                                                if (!cropperDialog) {
-                                                    // Tìm dialog nào chứa nút Apply và nút Cancel
-                                                    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
-                                                    cropperDialog = dialogs.find(d => {
-                                                        const txt = (d.innerText || '').toLowerCase();
-                                                        return (txt.includes('apply') || txt.includes('áp dụng')) && (txt.includes('cancel') || txt.includes('hủy') || txt.includes('zoom'));
-                                                    });
-                                                }
+                            try:
+                                file_input.first.set_input_files(abs_avatar, timeout=7000)
+                                self.background_log_signal.emit("✅ [TikTok] Đã chọn file ảnh thành công! Đang chờ popup cắt ảnh...")
+                                target_page.wait_for_timeout(2500)
 
-                                                // 2. Phạm vi tìm kiếm: ưu tiên tuyệt đối trong cropperDialog để không bao giờ bấm nhầm vào popup Shop!
-                                                const container = cropperDialog || document;
-                                                const btns = Array.from(container.querySelectorAll('button'));
-                                                for (const b of btns) {
-                                                    const t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                                                    // Chỉ lấy nút có text chính xác là Apply / Áp dụng
-                                                    if (t === 'apply' || t === 'áp dụng') {
-                                                        // Bấm trực tiếp trên đối tượng HTML DOM thuần túy (không bấm tọa độ)
-                                                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
-                                                            try {
-                                                                b.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
-                                                            } catch(e) {}
-                                                        });
-                                                        try { b.click(); } catch(e) {}
-                                                        return { ok: true, text: t };
-                                                    }
-                                                }
-                                                return { ok: false };
-                                            }''')
-
-                                            if isinstance(res_apply, dict) and res_apply.get('ok'):
-                                                clicked_apply = True
-                                                self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh trực tiếp qua HTML DOM thành công!")
-                                                break
-                                        except Exception:
-                                            pass
-                                        target_page.wait_for_timeout(1000)
-
-                                    if not clicked_apply:
-                                        self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy nút Apply trong HTML của modal cắt ảnh.")
-
-                                    # Chờ popup cắt ảnh đóng lại hoàn toàn để không che khuất form
+                                # Tìm và bấm nút Apply của modal cắt ảnh HOÀN TOÀN BẰNG CẤU TRÚC HTML DOM THUẦN TÚY (chống bấm nhầm vào popup shop)
+                                self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh) qua cấu trúc HTML DOM...")
+                                clicked_apply = False
+                                for apply_try in range(1, 10):
+                                    dismiss_tiktok_popups(target_page, self.background_log_signal)
                                     try:
-                                        target_page.locator('.react-transform-component').wait_for(state="detached", timeout=6000)
+                                        res_apply = target_page.evaluate('''() => {
+                                            // 1. Dò tìm chính xác container của modal cắt ảnh (chứa component zoom/transform)
+                                            const cropperComp = document.querySelector('.react-transform-component, [class*="cropper"], [class*="Cropper"], [class*="zoom-slider"]');
+                                            let cropperDialog = null;
+                                            if (cropperComp) {
+                                                cropperDialog = cropperComp.closest('div[role="dialog"], [class*="modal"], [class*="Modal"], div[class*="dialog"]') || cropperComp.parentElement;
+                                            }
+                                            if (!cropperDialog) {
+                                                const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                                                cropperDialog = dialogs.find(d => {
+                                                    const txt = (d.innerText || '').toLowerCase();
+                                                    return (txt.includes('apply') || txt.includes('áp dụng')) && (txt.includes('cancel') || txt.includes('hủy') || txt.includes('zoom'));
+                                                });
+                                            }
+
+                                            const container = cropperDialog || document;
+                                            const btns = Array.from(container.querySelectorAll('button'));
+                                            for (const b of btns) {
+                                                const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                                if (t === 'apply' || t === 'áp dụng') {
+                                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                                        try { b.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                                    });
+                                                    try { b.click(); } catch(e) {}
+                                                    return { ok: true, text: t };
+                                                }
+                                            }
+                                            return { ok: false };
+                                        }''')
+
+                                        if isinstance(res_apply, dict) and res_apply.get('ok'):
+                                            clicked_apply = True
+                                            self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh trực tiếp qua HTML DOM thành công!")
+                                            break
                                     except Exception:
                                         pass
-                                    target_page.wait_for_timeout(2500)
+                                    target_page.wait_for_timeout(1000)
 
-                                    # BẤM LƯU RIÊNG AVATAR!
-                                    self.background_log_signal.emit("💾 [TikTok] Đang lưu riêng Avatar...")
-                                    if click_save_dialog("Avatar"):
-                                        self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất gửi lệnh lưu Avatar!")
-                                        
-                                        # KIỂM TRA RIÊNG AVATAR (CHECK AVATAR: Chỉ xác nhận khi đã KHÁC avatar mặc định)
-                                        self.background_log_signal.emit("🔍 [TikTok] [Kiểm tra Avatar] Đang kiểm tra xem ảnh đại diện đã KHÁC avatar mặc định chưa...")
-                                        for check_av in range(1, 4):
-                                            self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_av}/3) Đang F5 (Reload) lại trang để kiểm tra Avatar...")
-                                            try:
-                                                target_page.reload(wait_until="domcontentloaded", timeout=25000)
-                                                target_page.wait_for_timeout(3500)
-                                            except Exception as reload_err:
-                                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
+                                if not clicked_apply:
+                                    self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy nút Apply trong HTML của modal cắt ảnh.")
 
-                                            is_not_default = False
-                                            try:
-                                                is_not_default = target_page.evaluate('''() => {
-                                                    const container = document.querySelector('span[class*="SpanAvatarContainer"], [data-e2e="user-avatar"], div[class*="AvatarContainer"]');
-                                                    if (!container) return false;
+                                # Chờ popup cắt ảnh đóng lại hoàn toàn để không che khuất form
+                                try:
+                                    target_page.locator('.react-transform-component').wait_for(state="detached", timeout=6000)
+                                except Exception:
+                                    pass
+                                target_page.wait_for_timeout(2000)
 
-                                                    // 1. Nếu chỉ chứa SVG icon bóng người rỗng
-                                                    if (container.querySelector('svg') && !container.querySelector('img')) return false;
+                                # BẤM LƯU RIÊNG AVATAR!
+                                self.background_log_signal.emit("💾 [TikTok] Đang lưu riêng Avatar...")
+                                if not click_save_dialog("Avatar"):
+                                    self.background_log_signal.emit("⚠️ [TikTok] Không thể bấm lưu Avatar.")
+                                    return False
 
-                                                    const img = container.querySelector('img');
-                                                    if (!img) return false;
+                                self.background_log_signal.emit("✅ [TikTok] Đã hoàn tất gửi lệnh lưu Avatar!")
+                                
+                                # KIỂM TRA RIÊNG AVATAR
+                                self.background_log_signal.emit("🔍 [TikTok] [Kiểm tra Avatar] Đang kiểm tra xem ảnh đại diện đã cập nhật chưa...")
+                                target_page.wait_for_timeout(3000)
+                                
+                                for check_av in range(1, 4):
+                                    is_not_default = False
+                                    try:
+                                        is_not_default = target_page.evaluate('''() => {
+                                            const imgs = Array.from(document.querySelectorAll('span[class*="Avatar"] img, div[class*="Avatar"] img, [data-e2e="user-avatar"] img, header img, img[class*="ImgAvatar"]'));
+                                            for (const img of imgs) {
+                                                const src = (img.currentSrc || img.src || '').toLowerCase();
+                                                if (!src || src.startsWith('data:image/svg')) continue;
+                                                
+                                                const defaultKeywords = ['musically-maliva-obj', '1594805258216454', 'default-avatar', 'avatar-default', 'musically-default', 'default_avatar', 'headshot', 'placeholder', 'empty'];
+                                                if (defaultKeywords.some(kw => src.includes(kw))) continue;
 
-                                                    const src = (img.currentSrc || img.src || '').toLowerCase();
-                                                    if (!src || src.startsWith('data:image/svg')) return false;
+                                                // Nếu ảnh có src từ CDN của TikTok
+                                                if (src.includes('tiktokcdn') || src.includes('avt') || src.includes('tos-') || src.includes('image') || src.includes('tiktok')) {
+                                                    return true;
+                                                }
+                                            }
+                                            return false;
+                                        }''')
+                                    except Exception:
+                                        pass
 
-                                                    // 2. Các định danh avatar mặc định của TikTok
-                                                    const defaultKeywords = ['musically-maliva-obj', '1594805258216454', 'default-avatar', 'avatar-default', 'musically-default', 'default_avatar', 'headshot', 'placeholder', 'empty'];
-                                                    for (const kw of defaultKeywords) {
-                                                        if (src.includes(kw)) return false;
-                                                    }
+                                    if is_not_default:
+                                        self.background_log_signal.emit("✅ [TikTok] [Kiểm tra Avatar] Đã xác nhận: Ảnh đại diện đã được cập nhật thành công (đã khác avatar mặc định)!")
+                                        return True
 
-                                                    // 3. Phải là ảnh avatar cá nhân tùy chỉnh trên CDN (chứa avt hoặc tos-)
-                                                    return src.includes('avt') || src.includes('tos-');
-                                                }''')
-                                            except Exception:
-                                                pass
+                                    if check_av < 3:
+                                        self.background_log_signal.emit(f"🔄 [TikTok] (Lần {check_av}/3) Đang F5 (Reload) lại trang để kiểm tra Avatar...")
+                                        try:
+                                            target_page.reload(wait_until="domcontentloaded", timeout=25000)
+                                            target_page.wait_for_timeout(3500)
+                                        except Exception as reload_err:
+                                            self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi F5 reload: {reload_err}")
 
-                                            if is_not_default:
-                                                avatar_success = True
-                                                self.background_log_signal.emit("✅ [TikTok] [Kiểm tra Avatar] Đã xác nhận: Ảnh đại diện đã được cập nhật thành công (đã khác avatar mặc định)!")
-                                                break
-                                            else:
-                                                self.background_log_signal.emit(f"⚠️ [TikTok] (Lần {check_av}/3) Ảnh vẫn là avatar mặc định của hệ thống.")
+                                return False
+                            except Exception as err:
+                                self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload/cắt avatar: {err}")
+                                return False
 
-                                        if not avatar_success:
-                                            self.background_log_signal.emit("❌ [TikTok] [Kiểm tra Avatar] Sau 3 lần F5, avatar vẫn chưa cập nhật được.")
-                                    else:
-                                        self.background_log_signal.emit("⚠️ [TikTok] Không thể bấm lưu Avatar.")
-
-                                except Exception as err:
-                                    self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi upload/cắt avatar: {err}")
-                            else:
-                                self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy ô input[type='file'] để nạp avatar.")
-                        else:
-                            self.background_log_signal.emit("⚠️ [TikTok] Không thể mở hộp thoại 'Edit profile' để đổi Avatar.")
+                        # Thử tải avatar lần 1
+                        avatar_success = perform_avatar_upload(attempt_num=1)
+                        # Nếu lần 1 chưa nhận diện được, tự động retry lần 2 ngay lập tức
+                        if not avatar_success:
+                            self.background_log_signal.emit("🔄 [TikTok] Avatar chưa nhận diện thành công -> Tự động thử lại lần 2 ngay lập tức...")
+                            target_page.wait_for_timeout(2000)
+                            avatar_success = perform_avatar_upload(attempt_num=2)
                     
                     target_page.wait_for_timeout(2000)
 
