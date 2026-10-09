@@ -2900,44 +2900,53 @@ class MainWindow(QWidget):
                         self.background_log_signal.emit(f"⚠️ [TikTok] Không thấy nút 'Edit profile' để {desc}.")
                         return False
 
-                    # Hàm hỗ trợ bấm nút Save và xử lý confirm modal
+                    # Hàm hỗ trợ bấm nút Save và xử lý confirm modal bằng HTML DOM
                     def click_save_dialog(save_action_name="Lưu"):
                         self.background_log_signal.emit(f"💾 [TikTok] Đang chờ nút Save sẵn sàng ({save_action_name})...")
-                        save_btn = target_page.locator('div[data-e2e="edit-profile-popup"] button[data-e2e="edit-profile-save"], button[data-e2e="edit-profile-save"], div[aria-label="Edit profile"] button[data-e2e="edit-profile-save"]')
-                        if save_btn.count() > 0:
-                            save_ready = False
-                            for _ in range(10):
+                        dismiss_tiktok_popups(target_page, self.background_log_signal)
+                        save_clicked = False
+                        for _ in range(10):
+                            try:
+                                res_save = target_page.evaluate('''() => {
+                                    const popup = document.querySelector('div[data-e2e="edit-profile-popup"], div[aria-label="Edit profile"]') || document;
+                                    const saveBtn = popup.querySelector('button[data-e2e="edit-profile-save"]') || Array.from(popup.querySelectorAll('button')).find(b => {
+                                        const t = (b.innerText || '').trim().toLowerCase();
+                                        return t === 'save' || t === 'lưu';
+                                    });
+                                    if (saveBtn) {
+                                        if (saveBtn.disabled) return { disabled: true };
+                                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                            try { saveBtn.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                        });
+                                        try { saveBtn.click(); } catch(e) {}
+                                        return { ok: true };
+                                    }
+                                    return { not_found: true };
+                                }''')
+                                if isinstance(res_save, dict) and res_save.get('ok'):
+                                    save_clicked = True
+                                    self.background_log_signal.emit(f"✅ [TikTok] Đã bấm nút Save ({save_action_name}) qua HTML DOM thành công!")
+                                    break
+                            except Exception:
+                                pass
+                            target_page.wait_for_timeout(1000)
+
+                        if not save_clicked:
+                            self.background_log_signal.emit(f"⚠️ [TikTok] Fallback click nút Save ({save_action_name})...")
+                            save_btn = target_page.locator('div[data-e2e="edit-profile-popup"] button[data-e2e="edit-profile-save"], button[data-e2e="edit-profile-save"]')
+                            if save_btn.count() > 0:
                                 try:
-                                    if not save_btn.first.is_disabled():
-                                        save_ready = True
-                                        break
+                                    save_btn.first.click(force=True, timeout=3000)
+                                    save_clicked = True
                                 except Exception:
                                     pass
-                                target_page.wait_for_timeout(1000)
 
-                            if save_ready:
-                                save_btn.first.click(timeout=5000)
-                                self.background_log_signal.emit(f"✅ [TikTok] Đã bấm nút Save ({save_action_name}) thành công!")
-                            else:
-                                self.background_log_signal.emit(f"⚠️ [TikTok] Nút Save ({save_action_name}) chưa enable, click force...")
-                                save_btn.first.click(force=True, timeout=4000)
+                        target_page.wait_for_timeout(2000)
 
-                            target_page.wait_for_timeout(2000)
-
-                            # Chờ và bấm modal xác nhận nếu có (Confirm)
-                            confirm_modal = target_page.locator('div[role="dialog"]:not([data-e2e="edit-profile-popup"]) button:has-text("Confirm"), div[role="dialog"]:not([data-e2e="edit-profile-popup"]) button:has-text("Xác nhận"), div[role="dialog"] button.TUXButton--primary, div[role="dialog"] button:has-text("Change"), div[role="dialog"] button:has-text("Confirm"), button:has-text("Confirm")')
-                            for _ in range(5):
-                                if confirm_modal.count() > 0:
-                                    try:
-                                        self.background_log_signal.emit("👆 [TikTok] Đã phát hiện modal xác nhận (Confirm). Đang bấm...")
-                                        confirm_modal.first.click(force=True, timeout=3000)
-                                        break
-                                    except Exception:
-                                        pass
-                                target_page.wait_for_timeout(1000)
-
+                        # Chờ và bấm modal xác nhận nếu có (Confirm) HOÀN TOÀN BẰNG HTML DOM
+                        for _ in range(5):
                             try:
-                                target_page.evaluate('''() => {
+                                confirmed = target_page.evaluate('''() => {
                                     const dialogs = document.querySelectorAll('div[role="dialog"]');
                                     for (const d of dialogs) {
                                         if (d.getAttribute('data-e2e') === 'edit-profile-popup') continue;
@@ -2945,16 +2954,24 @@ class MainWindow(QWidget):
                                         for (const b of btns) {
                                             const txt = (b.innerText || '').trim().toLowerCase();
                                             if (txt === 'confirm' || txt === 'xác nhận' || txt === 'change' || txt === 'đổi') {
-                                                b.click();
+                                                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                                    try { b.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                                });
+                                                try { b.click(); } catch(e) {}
                                                 return true;
                                             }
                                         }
                                     }
                                     return false;
                                 }''')
+                                if confirmed:
+                                    self.background_log_signal.emit("👆 [TikTok] Đã bấm xác nhận modal Confirm qua HTML DOM thành công!")
+                                    break
                             except Exception:
                                 pass
+                            target_page.wait_for_timeout(1000)
 
+                        if save_clicked:
                             self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi TikTok lưu dữ liệu ({save_action_name}) lên máy chủ...")
                             target_page.wait_for_timeout(3500)
                             try:
@@ -2991,33 +3008,58 @@ class MainWindow(QWidget):
                                     self.background_log_signal.emit("✅ [TikTok] Đã chọn file ảnh thành công! Đang chờ popup cắt ảnh...")
                                     target_page.wait_for_timeout(2500)
 
-                                    # Tìm và bấm nút Apply của modal cắt ảnh
-                                    self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh)...")
-                                    apply_btn = target_page.locator('button:has-text("Apply"), button:has-text("Áp dụng")')
-                                    
+                                    # Tìm và bấm nút Apply của modal cắt ảnh HOÀN TOÀN BẰNG CẤU TRÚC HTML DOM THUẦN TÚY (chống bấm nhầm vào popup shop)
+                                    self.background_log_signal.emit("👆 [TikTok] Tìm và bấm nút Apply (Cắt ảnh) qua cấu trúc HTML DOM...")
                                     clicked_apply = False
-                                    for _ in range(5):
-                                        if apply_btn.count() > 0:
-                                            try:
-                                                apply_btn.last.click(force=True, timeout=3000)
+                                    for apply_try in range(1, 10):
+                                        dismiss_tiktok_popups(target_page, self.background_log_signal)
+                                        try:
+                                            res_apply = target_page.evaluate('''() => {
+                                                // 1. Dò tìm chính xác container của modal cắt ảnh (chứa component zoom/transform)
+                                                const cropperComp = document.querySelector('.react-transform-component, [class*="cropper"], [class*="Cropper"], [class*="zoom-slider"]');
+                                                let cropperDialog = null;
+                                                if (cropperComp) {
+                                                    cropperDialog = cropperComp.closest('div[role="dialog"], [class*="modal"], [class*="Modal"], div[class*="dialog"]') || cropperComp.parentElement;
+                                                }
+                                                if (!cropperDialog) {
+                                                    // Tìm dialog nào chứa nút Apply và nút Cancel
+                                                    const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                                                    cropperDialog = dialogs.find(d => {
+                                                        const txt = (d.innerText || '').toLowerCase();
+                                                        return (txt.includes('apply') || txt.includes('áp dụng')) && (txt.includes('cancel') || txt.includes('hủy') || txt.includes('zoom'));
+                                                    });
+                                                }
+
+                                                // 2. Phạm vi tìm kiếm: ưu tiên tuyệt đối trong cropperDialog để không bao giờ bấm nhầm vào popup Shop!
+                                                const container = cropperDialog || document;
+                                                const btns = Array.from(container.querySelectorAll('button'));
+                                                for (const b of btns) {
+                                                    const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                                    // Chỉ lấy nút có text chính xác là Apply / Áp dụng
+                                                    if (t === 'apply' || t === 'áp dụng') {
+                                                        // Bấm trực tiếp trên đối tượng HTML DOM thuần túy (không bấm tọa độ)
+                                                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                                            try {
+                                                                b.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                                                            } catch(e) {}
+                                                        });
+                                                        try { b.click(); } catch(e) {}
+                                                        return { ok: true, text: t };
+                                                    }
+                                                }
+                                                return { ok: false };
+                                            }''')
+
+                                            if isinstance(res_apply, dict) and res_apply.get('ok'):
                                                 clicked_apply = True
-                                                self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh.")
+                                                self.background_log_signal.emit("✅ [TikTok] Đã bấm nút Apply cắt ảnh trực tiếp qua HTML DOM thành công!")
                                                 break
-                                            except Exception:
-                                                pass
+                                        except Exception:
+                                            pass
                                         target_page.wait_for_timeout(1000)
 
                                     if not clicked_apply:
-                                        try:
-                                            target_page.evaluate('''() => {
-                                                const btns = Array.from(document.querySelectorAll('button'));
-                                                for (const b of btns) {
-                                                    const t = (b.innerText || '').trim().toLowerCase();
-                                                    if (t === 'apply' || t === 'áp dụng') { b.click(); return; }
-                                                }
-                                            }''')
-                                        except Exception:
-                                            pass
+                                        self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy nút Apply trong HTML của modal cắt ảnh.")
 
                                     # Chờ popup cắt ảnh đóng lại hoàn toàn để không che khuất form
                                     try:
