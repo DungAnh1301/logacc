@@ -2904,13 +2904,23 @@ class MainWindow(QWidget):
                     def handle_confirm_modal(timeout_rounds=8):
                         """
                         Phát hiện và tự động bấm nút 'Confirm' trên modal xác nhận (đặc biệt là đổi Nickname 7 ngày):
-                        'Set nickname? You can only change your nickname once every 7 days' -> Nút Confirm màu đỏ
+                        <div data-e2e="set-username-popup"> -> <button data-e2e="set-username-popup-confirm">Confirm</button>
                         """
                         for _ in range(timeout_rounds):
                             try:
                                 clicked_res = target_page.evaluate('''() => {
+                                    // 0. Ưu tiên số 1: Trúng đích tuyệt đối theo thuộc tính chuẩn data-e2e của TikTok
+                                    const directBtn = document.querySelector('button[data-e2e="set-username-popup-confirm"], [data-e2e="set-username-popup"] button[data-e2e="set-username-popup-confirm"], [data-e2e="set-username-popup"] button:not([data-e2e="set-username-popup-cancel"])');
+                                    if (directBtn) {
+                                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                            try { directBtn.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                        });
+                                        try { directBtn.click(); } catch(e) {}
+                                        return { ok: true, source: 'data-e2e-exact', text: directBtn.innerText || 'Confirm' };
+                                    }
+
                                     // 1. Quét tìm container hoặc modal chứa text '7 days' hoặc '7 ngày' hoặc 'Set nickname' hoặc 'Change nickname'
-                                    const containers = Array.from(document.querySelectorAll('div, section, aside, form, dialog, [role="dialog"], [role="alertdialog"]'));
+                                    const containers = Array.from(document.querySelectorAll('[data-e2e="set-username-popup"], div, section, aside, form, dialog, [role="dialog"], [role="alertdialog"]'));
                                     for (const c of containers) {
                                         const text = (c.innerText || c.textContent || '').toLowerCase();
                                         if ((text.includes('7 days') || text.includes('7 ngày') || text.includes('set nickname') || text.includes('change nickname')) && (text.includes('cancel') || text.includes('hủy') || text.includes('confirm') || text.includes('xác nhận'))) {
@@ -2965,7 +2975,7 @@ class MainWindow(QWidget):
                                 pass
 
                             try:
-                                confirm_loc = target_page.locator('button:has-text("Confirm"), button:has-text("Xác nhận"), div[role="button"]:has-text("Confirm")')
+                                confirm_loc = target_page.locator('button[data-e2e="set-username-popup-confirm"], button:has-text("Confirm"), button:has-text("Xác nhận")')
                                 if confirm_loc.count() > 0 and confirm_loc.first.is_visible():
                                     confirm_loc.first.click(force=True, timeout=1500)
                                     self.background_log_signal.emit("👆 [TikTok] Đã click nút Confirm (Thông báo 7 ngày) qua Playwright locator thành công!")
