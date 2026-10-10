@@ -2900,6 +2900,83 @@ class MainWindow(QWidget):
                         self.background_log_signal.emit(f"⚠️ [TikTok] Không thấy nút 'Edit profile' để {desc}.")
                         return False
 
+                    # Hàm hỗ trợ tự động phát hiện và bấm nút 'Confirm' trên modal xác nhận (đặc biệt là 7 ngày đổi Nickname)
+                    def handle_confirm_modal(timeout_rounds=8):
+                        """
+                        Phát hiện và tự động bấm nút 'Confirm' trên modal xác nhận (đặc biệt là đổi Nickname 7 ngày):
+                        'Set nickname? You can only change your nickname once every 7 days' -> Nút Confirm màu đỏ
+                        """
+                        for _ in range(timeout_rounds):
+                            try:
+                                clicked_res = target_page.evaluate('''() => {
+                                    // 1. Quét tìm container hoặc modal chứa text '7 days' hoặc '7 ngày' hoặc 'Set nickname' hoặc 'Change nickname'
+                                    const containers = Array.from(document.querySelectorAll('div, section, aside, form, dialog, [role="dialog"], [role="alertdialog"]'));
+                                    for (const c of containers) {
+                                        const text = (c.innerText || c.textContent || '').toLowerCase();
+                                        if ((text.includes('7 days') || text.includes('7 ngày') || text.includes('set nickname') || text.includes('change nickname')) && (text.includes('cancel') || text.includes('hủy') || text.includes('confirm') || text.includes('xác nhận'))) {
+                                            const btns = Array.from(c.querySelectorAll('button, [role="button"]'));
+                                            for (const b of btns) {
+                                                const bTxt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                                if (bTxt === 'cancel' || bTxt === 'hủy' || bTxt === 'huỷ' || bTxt === 'close') continue;
+                                                if (bTxt === 'confirm' || bTxt === 'xác nhận' || bTxt === 'change' || bTxt.includes('confirm') || bTxt.includes('xác nhận') || bTxt.includes('change') || bTxt.includes('set') || bTxt.includes('đổi')) {
+                                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                                        try { b.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                                    });
+                                                    try { b.click(); } catch(e) {}
+                                                    return { ok: true, source: 'modal_container', text: bTxt };
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 2. Quét trực tiếp TẤT CẢ các thẻ button trên toàn bộ DOM (không giới hạn container)
+                                    const allButtons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+                                    for (const b of allButtons) {
+                                        const bTxt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                        if (bTxt === 'confirm' || bTxt === 'xác nhận') {
+                                            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                                try { b.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                            });
+                                            try { b.click(); } catch(e) {}
+                                            return { ok: true, source: 'exact_confirm_button', text: bTxt };
+                                        }
+                                    }
+
+                                    // 3. Quét button có chữ confirm hoặc xác nhận (includes)
+                                    for (const b of allButtons) {
+                                        const bTxt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                        if (bTxt.includes('cancel') || bTxt.includes('hủy') || bTxt.includes('huỷ')) continue;
+                                        if (bTxt.includes('confirm') || bTxt.includes('xác nhận')) {
+                                            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                                                try { b.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
+                                            });
+                                            try { b.click(); } catch(e) {}
+                                            return { ok: true, source: 'includes_confirm_button', text: bTxt };
+                                        }
+                                    }
+
+                                    return null;
+                                }''')
+                                if clicked_res and isinstance(clicked_res, dict) and clicked_res.get('ok'):
+                                    self.background_log_signal.emit(f"👆 [TikTok] Đã bấm xác nhận nút '{clicked_res.get('text', 'Confirm')}' (Thông báo 7 ngày) qua HTML DOM thành công!")
+                                    target_page.wait_for_timeout(1500)
+                                    return True
+                            except Exception:
+                                pass
+
+                            try:
+                                confirm_loc = target_page.locator('button:has-text("Confirm"), button:has-text("Xác nhận"), div[role="button"]:has-text("Confirm")')
+                                if confirm_loc.count() > 0 and confirm_loc.first.is_visible():
+                                    confirm_loc.first.click(force=True, timeout=1500)
+                                    self.background_log_signal.emit("👆 [TikTok] Đã click nút Confirm (Thông báo 7 ngày) qua Playwright locator thành công!")
+                                    target_page.wait_for_timeout(1500)
+                                    return True
+                            except Exception:
+                                pass
+
+                            target_page.wait_for_timeout(800)
+                        return False
+
                     # Hàm hỗ trợ bấm nút Save và xử lý confirm modal bằng HTML DOM
                     def click_save_dialog(save_action_name="Lưu"):
                         self.background_log_signal.emit(f"💾 [TikTok] Đang chờ nút Save sẵn sàng ({save_action_name})...")
@@ -2941,37 +3018,12 @@ class MainWindow(QWidget):
                                 except Exception:
                                     pass
 
-                        target_page.wait_for_timeout(2000)
-
-                        # Chờ và bấm modal xác nhận nếu có (Confirm) HOÀN TOÀN BẰNG HTML DOM
-                        for _ in range(5):
-                            try:
-                                confirmed = target_page.evaluate('''() => {
-                                    const dialogs = document.querySelectorAll('div[role="dialog"]');
-                                    for (const d of dialogs) {
-                                        if (d.getAttribute('data-e2e') === 'edit-profile-popup') continue;
-                                        const btns = d.querySelectorAll('button');
-                                        for (const b of btns) {
-                                            const txt = (b.innerText || '').trim().toLowerCase();
-                                            if (txt === 'confirm' || txt === 'xác nhận' || txt === 'change' || txt === 'đổi') {
-                                                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                                                    try { b.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window })); } catch(e) {}
-                                                });
-                                                try { b.click(); } catch(e) {}
-                                                return true;
-                                            }
-                                        }
-                                    }
-                                    return false;
-                                }''')
-                                if confirmed:
-                                    self.background_log_signal.emit("👆 [TikTok] Đã bấm xác nhận modal Confirm qua HTML DOM thành công!")
-                                    break
-                            except Exception:
-                                pass
-                            target_page.wait_for_timeout(1000)
+                        target_page.wait_for_timeout(1500)
 
                         if save_clicked:
+                            # Chờ và bấm modal xác nhận nếu có (Confirm 7 ngày) HOÀN TOÀN BẰNG HTML DOM
+                            handle_confirm_modal(timeout_rounds=7)
+
                             self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi TikTok lưu dữ liệu ({save_action_name}) lên máy chủ...")
                             target_page.wait_for_timeout(3500)
                             try:
@@ -3234,7 +3286,12 @@ class MainWindow(QWidget):
                                     # KIỂM TRA RIÊNG TÊN NICK (CHECK NAME)
                                     self.background_log_signal.emit(f"🔍 [TikTok] [Kiểm tra Tên Nick] Đang kiểm tra xem tên '{chosen_nick}' đã cập nhật chưa...")
                                     for check_attempt in range(1, 4):
-                                        target_page.wait_for_timeout(2000)
+                                        target_page.wait_for_timeout(1500)
+
+                                        # KIỂM TRA TRƯỚC KHI F5 RELOAD: Nếu modal Confirm (7 ngày) vẫn còn hiển thị thì bấm ngay lập tức!
+                                        if handle_confirm_modal(timeout_rounds=2):
+                                            self.background_log_signal.emit("👆 [TikTok] Đã phát hiện và bấm bổ sung nút Confirm (7 ngày)! Đang đợi máy chủ lưu...")
+                                            target_page.wait_for_timeout(3500)
                                         
                                         current_title = ""
                                         try:
