@@ -398,21 +398,9 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal):
                             if received_str:
                                 msg_time = datetime.fromisoformat(received_str.replace('Z', '+00:00'))
                                 time_diff = (datetime.now(timezone.utc) - msg_time).total_seconds()
-                                if time_diff <= 120 and time_diff >= -10:
+                                if time_diff <= 45 and time_diff >= -10:
                                     log_signal.emit(f"🎯 Bắt được mã OTP mới (Nhận cách đây {int(time_diff)}s): {otp_code}")
                                     return otp_code
-
-                if elapsed_time > 20 and messages:
-                    for msg in messages:
-                        subject = msg.get('subject', '')
-                        preview = msg.get('bodyPreview', '')
-                        full_text = f"{subject} {preview}"
-                        if "microsoft" in full_text.lower() or "mã" in full_text.lower() or "code" in full_text.lower() or "security" in full_text.lower():
-                            match = re.search(r'\b\d{4,7}\b', full_text)
-                            if match:
-                                otp_code = match.group(0)
-                                log_signal.emit(f"⚠️ Lấy tạm mã OTP gần nhất: {otp_code}")
-                                return otp_code
 
             time.sleep(4)
             log_signal.emit(f"⏳ Đang đợi thư OTP về (lần thử {attempt+1}/20)...")
