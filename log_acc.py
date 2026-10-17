@@ -2351,6 +2351,7 @@ class MainWindow(QWidget):
     vpn_gpm_finished_signal = pyqtSignal()
     gpm_api_detected_signal = pyqtSignal(str)
     otp_received_signal = pyqtSignal(str)
+    advance_profile_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -2361,6 +2362,7 @@ class MainWindow(QWidget):
         self.vpn_gpm_finished_signal.connect(self.on_vpn_gpm_finished)
         self.gpm_api_detected_signal.connect(self.on_gpm_api_detected)
         self.otp_received_signal.connect(self.on_otp_received)
+        self.advance_profile_signal.connect(self.advance_gpm_profile)
         self.initUI()
 
         # Tự động quét API / khởi động GPM & giải License sau 1.2s khi mở app
@@ -3379,6 +3381,7 @@ class MainWindow(QWidget):
                             cmd_path = r'cd /d "C:\Program Files\ExpressVPN" && .\expressvpnctl'
                             subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
                             self.background_log_signal.emit("✅ [VPN] Đã tự động ngắt kết nối ExpressVPN thành công!")
+                            self.advance_profile_signal.emit()
                         except Exception as vpn_err:
                             self.background_log_signal.emit(f"⚠️ [VPN] Không thể ngắt kết nối ExpressVPN: {vpn_err}")
                     else:
@@ -3930,7 +3933,32 @@ class MainWindow(QWidget):
                                 time.sleep(2)
                                 self.trigger_change_name_avatar()
                             else:
-                                self.background_log_signal.emit("ℹ️ [TikTok] Đã đăng nhập xong (Tùy chọn Đổi tên/Avatar đang tắt).")
+                                self.background_log_signal.emit("ℹ️ [TikTok] Đã đăng nhập TikTok thành công (Tùy chọn Đổi tên/Avatar đang tắt).")
+                                self.background_log_signal.emit("🛑 [TikTok] Đang đóng trình duyệt Chrome...")
+                                try:
+                                    browser.close()
+                                    self.background_log_signal.emit("🛑 [TikTok] Đã đóng Chrome thành công!")
+                                except Exception as close_err:
+                                    self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi đóng Chrome: {close_err}")
+
+                                if target and target.get("id"):
+                                    try:
+                                        base_api = api_url.rstrip('/')
+                                        requests.get(f"{base_api}/profiles/close/{target['id']}", timeout=5)
+                                        requests.get(f"{base_api}/api/v3/profiles/close/{target['id']}", timeout=5)
+                                    except Exception:
+                                        pass
+
+                                self.background_log_signal.emit("🌐 [VPN] Đang tự động ngắt kết nối ExpressVPN...")
+                                try:
+                                    cmd_path = r'cd /d "C:\Program Files\ExpressVPN" && .\expressvpnctl'
+                                    subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
+                                    self.background_log_signal.emit("✅ [VPN] Đã tự động ngắt kết nối ExpressVPN thành công!")
+                                    self.advance_profile_signal.emit()
+                                except Exception as vpn_err:
+                                    self.background_log_signal.emit(f"⚠️ [VPN] Không thể ngắt kết nối ExpressVPN: {vpn_err}")
+
+                                self.background_log_signal.emit("🎉 [Hoàn tất] Đã hoàn thành đăng nhập TikTok và sẵn sàng cho profile tiếp theo!")
             except Exception as mute_err:
                 self.background_log_signal.emit(f"⚠️ [TikTok] Ghi chú mute site: {mute_err}")
 
