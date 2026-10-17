@@ -2744,8 +2744,22 @@ class MainWindow(QWidget):
                 from playwright.sync_api import sync_playwright
 
                 with sync_playwright() as p:
-                    # 1. Kết nối trực tiếp vào GPM Chrome đang mở
-                    browser = p.chromium.connect_over_cdp(remote_address)
+                    # 1. Kết nối trực tiếp vào GPM Chrome đang mở (kèm cơ chế thử lại nếu Chrome đang bận/khởi động)
+                    browser = None
+                    last_conn_err = None
+                    for conn_attempt in range(1, 13):
+                        try:
+                            browser = p.chromium.connect_over_cdp(remote_address, timeout=5000)
+                            if browser:
+                                break
+                        except Exception as ce:
+                            last_conn_err = ce
+                            time.sleep(1)
+
+                    if not browser:
+                        self.background_log_signal.emit(f"⚠️ [TikTok] Không thể kết nối CDP ({remote_address}): {last_conn_err}")
+                        return
+
                     contexts = browser.contexts
                     if not contexts:
                         self.background_log_signal.emit("⚠️ [TikTok] Không tìm thấy browser context trên GPM.")
@@ -3498,7 +3512,21 @@ class MainWindow(QWidget):
                 patch_playwright_driver()
                 from playwright.sync_api import sync_playwright
                 with sync_playwright() as p:
-                    browser = p.chromium.connect_over_cdp(remote_address)
+                    # Chờ Chrome mở cổng CDP và thử kết nối nhiều lần tránh ECONNREFUSED
+                    browser = None
+                    last_conn_err = None
+                    for conn_attempt in range(1, 13):
+                        try:
+                            browser = p.chromium.connect_over_cdp(remote_address, timeout=5000)
+                            if browser:
+                                break
+                        except Exception as ce:
+                            last_conn_err = ce
+                            time.sleep(1)
+
+                    if not browser:
+                        raise Exception(f"Trình duyệt GPM chưa sẵn sàng kết nối CDP ({remote_address}) sau 12s: {last_conn_err}")
+
                     contexts = browser.contexts
                     if contexts:
                         context = contexts[0]
