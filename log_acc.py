@@ -1027,10 +1027,13 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                 # 1) Help protect your account -> Add email
                 # 2) Add an email address -> nhập email -> Next (trước đây là Add email)
                 # 3) Enter your code -> 6 ô OTP tách rời
-                # Không phụ thuộc riêng vào text "Add email", vì Microsoft đã đổi
-                # nút submit của màn hình nhập email thành "Next".
-                new_recovery_input = page.locator("#floatingLabelInput10")
-                new_primary_button = page.locator("button[data-testid='primaryButton']")
+                # Luồng Microsoft Fluent mới:
+                # 1) Help protect your account -> Add email
+                # 2) Add an email address -> nhập email (id floatingLabelInputX / .fui-Input__input) -> Next
+                # 3) Enter your code -> 6 ô OTP tách rời (#codeEntry-0 .. 5)
+                fluent_email_selector = "input[id^='floatingLabelInput'], input.fui-Input__input, input[type='email'], input[aria-describedby*='validationMessage']"
+                new_recovery_input = page.locator(fluent_email_selector).first
+                new_primary_button = page.locator("button[data-testid='primaryButton'], button[type='submit']").first
                 is_new_recovery_flow = (
                     "help protect your account" in content.lower()
                     or "add an email address" in content.lower()
@@ -1061,31 +1064,48 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                                 log_signal.emit(f"🛑 [Microsoft] Màn hình bị lỗi 'Something went wrong' với email {rec_email}. Đang tắt Chrome để đổi email...")
                                 raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}", failed_recovery=cur_recovery)
 
-                            # Ở trang Help protect, phải bấm Add email để mở ô nhập.
-                            if not await new_recovery_input.is_visible():
+                            # Ở trang Help protect, nếu chưa thấy ô nhập email thì bấm Add email để mở
+                            cur_input = page.locator(fluent_email_selector).first
+                            if not await cur_input.is_visible():
                                 add_email_button = page.get_by_role(
-                                    "button", name=re.compile(r"^Add email$", re.I)
+                                    "button", name=re.compile(r"Add email", re.I)
                                 )
                                 if await add_email_button.count() > 0:
-                                    await add_email_button.click(timeout=10000)
-                                    await page.wait_for_selector(
-                                        "#floatingLabelInput10",
-                                        state="visible",
-                                        timeout=15000
-                                    )
+                                    await add_email_button.first.click(timeout=10000)
+                                    try:
+                                        await page.wait_for_selector(
+                                            fluent_email_selector,
+                                            state="visible",
+                                            timeout=15000
+                                        )
+                                    except Exception:
+                                        pass
 
-                            await new_recovery_input.fill("")
-                            await new_recovery_input.fill(rec_email)
+                            # Đảm bảo ô input đã sẵn sàng trên DOM và điền email
+                            await page.wait_for_selector(fluent_email_selector, state="visible", timeout=10000)
+                            target_input = page.locator(fluent_email_selector).first
+                            await target_input.click()
+                            await target_input.fill("")
+                            await target_input.fill(rec_email)
+                            await asyncio.sleep(0.3)
 
-                            await new_primary_button.wait_for(state="visible", timeout=10000)
-                            await new_primary_button.click(timeout=10000)
+                            # Kiểm tra nếu React chưa nhận giá trị thì gõ từng phím
+                            val_check = await target_input.input_value()
+                            if val_check != rec_email:
+                                await target_input.press_sequentially(rec_email, delay=30)
+                                await asyncio.sleep(0.3)
+
+                            # Bấm nút Next (primaryButton)
+                            submit_btn = page.locator("button[data-testid='primaryButton'], button[type='submit']").first
+                            await submit_btn.wait_for(state="visible", timeout=10000)
+                            await submit_btn.click(timeout=10000)
 
                             # Chờ xem có xuất hiện ô OTP không hoặc bị dính Something went wrong
                             otp_appeared = False
                             hit_sww = False
-                            for _ in range(8):
+                            for _ in range(15):
                                 await pause_event.wait()
-                                if await page.is_visible("#codeEntry-0"):
+                                if await page.is_visible("input[id^='codeEntry-']"):
                                     otp_appeared = True
                                     break
                                 check_c = (await safe_page_content(page)).lower()
