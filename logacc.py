@@ -3107,7 +3107,7 @@ class MainWindow(QWidget):
                     # 1. Kết nối trực tiếp vào GPM Chrome đang mở (kèm cơ chế thử lại nếu Chrome đang bận/khởi động)
                     browser = None
                     last_conn_err = None
-                    for conn_attempt in range(1, 36):
+                    for conn_attempt in range(1, 61):
                         try:
                             browser = p.chromium.connect_over_cdp(remote_address, timeout=4000)
                             if browser:
@@ -3115,11 +3115,11 @@ class MainWindow(QWidget):
                         except Exception as ce:
                             last_conn_err = ce
                             if conn_attempt % 5 == 0:
-                                self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi Chrome khởi động & mở cổng CDP ({conn_attempt}/35s)...")
+                                self.background_log_signal.emit(f"⏳ [TikTok] Đang đợi Chrome khởi động & mở cổng CDP ({conn_attempt}/60s)...")
                             time.sleep(1)
 
                     if not browser:
-                        self.background_log_signal.emit(f"⚠️ [TikTok] Không thể kết nối CDP ({remote_address}) sau 35s: {last_conn_err}")
+                        self.background_log_signal.emit(f"⚠️ [TikTok] Không thể kết nối CDP ({remote_address}) sau 60s: {last_conn_err}")
                         return
 
                     self.background_log_signal.emit(f"✅ [TikTok] Đã kết nối CDP thành công tới Chrome (sau {conn_attempt}s)!")
@@ -3885,7 +3885,7 @@ class MainWindow(QWidget):
                     # Chờ Chrome mở cổng CDP và thử kết nối nhiều lần tránh ECONNREFUSED
                     browser = None
                     last_conn_err = None
-                    for conn_attempt in range(1, 36):
+                    for conn_attempt in range(1, 61):
                         try:
                             browser = p.chromium.connect_over_cdp(remote_address, timeout=4000)
                             if browser:
@@ -3893,11 +3893,11 @@ class MainWindow(QWidget):
                         except Exception as ce:
                             last_conn_err = ce
                             if conn_attempt % 5 == 0:
-                                self.background_log_signal.emit(f"⏳ [GPM] Đang đợi Chrome mở cổng CDP ({conn_attempt}/35s)...")
+                                self.background_log_signal.emit(f"⏳ [GPM] Đang đợi Chrome mở cổng CDP ({conn_attempt}/60s)...")
                             time.sleep(1)
 
                     if not browser:
-                        raise Exception(f"Trình duyệt GPM chưa sẵn sàng kết nối CDP ({remote_address}) sau 35s: {last_conn_err}")
+                        raise Exception(f"Trình duyệt GPM chưa sẵn sàng kết nối CDP ({remote_address}) sau 60s: {last_conn_err}")
 
                     self.background_log_signal.emit(f"✅ [GPM] Đã kết nối CDP thành công tới Chrome (sau {conn_attempt}s)!")
 
