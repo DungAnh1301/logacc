@@ -411,6 +411,114 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal):
         return None
 
 
+def get_graph_access_token_quick(recovery_acc_str):
+    try:
+        parts = recovery_acc_str.split('|')
+        if len(parts) < 4:
+            return None
+        ref_token = parts[2].strip()
+        client_id = parts[3].strip()
+        token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        payload = {
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": ref_token,
+            "scope": "offline_access https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read"
+        }
+        res = requests.post(token_url, data=payload, timeout=12)
+        if res.status_code == 200:
+            return res.json().get('access_token')
+    except Exception:
+        pass
+    return None
+
+
+def check_account_otp_quick(access_token):
+    if not access_token:
+        return None
+    try:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        messages_url = "https://graph.microsoft.com/v1.0/me/messages?$select=subject,bodyPreview,receivedDateTime&$orderby=receivedDateTime%20desc&$top=3"
+        response = requests.get(messages_url, headers=headers, timeout=8)
+        if response.status_code == 200:
+            messages = response.json().get('value', [])
+            now_utc = datetime.now(timezone.utc)
+            for msg in messages:
+                received_str = msg.get('receivedDateTime', '')
+                subject = msg.get('subject', '')
+                preview = msg.get('bodyPreview', '')
+                full_text = f"{subject} {preview}"
+                if "microsoft" in full_text.lower() or "mã" in full_text.lower() or "code" in full_text.lower() or "security" in full_text.lower():
+                    match = re.search(r'\b\d{4,7}\b', full_text)
+                    if match and received_str:
+                        msg_time = datetime.fromisoformat(received_str.replace('Z', '+00:00'))
+                        time_diff = (now_utc - msg_time).total_seconds()
+                        if -10 <= time_diff <= 60:
+                            return match.group(0), int(time_diff)
+    except Exception:
+        pass
+    return None
+
+
+def scan_all_recovery_accounts_for_otp(candidate_accounts, log_signal, max_rounds=20, round_interval=4):
+    import concurrent.futures
+    log_signal.emit(f"🔄 Đang kết nối API đồng thời cho {len(candidate_accounts)} email khôi phục phù hợp...")
+    
+    # 1. Lấy Access Token song song cho tất cả các tài khoản ứng viên
+    account_tokens = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(candidate_accounts), 8)) as executor:
+        future_to_acc = {executor.submit(get_graph_access_token_quick, acc): acc for acc in candidate_accounts}
+        for future in concurrent.futures.as_completed(future_to_acc):
+            acc = future_to_acc[future]
+            try:
+                token = future.result()
+                if token:
+                    account_tokens[acc] = token
+            except Exception:
+                pass
+
+    if not account_tokens:
+        log_signal.emit("❌ Không lấy được Access Token cho bất kỳ email khôi phục nào!")
+        return None, None
+
+    log_signal.emit(f"✅ Đã có Access Token của {len(account_tokens)} email khôi phục. Bắt đầu quét đồng thời tìm OTP...")
+
+    # 2. Quét hộp thư tất cả tài khoản cùng lúc trong mỗi vòng
+    for attempt in range(max_rounds):
+        found_otp = None
+        winning_acc = None
+        time_diff_sec = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(account_tokens), 8)) as executor:
+            future_to_acc = {
+                executor.submit(check_account_otp_quick, token): acc 
+                for acc, token in account_tokens.items()
+            }
+            for future in concurrent.futures.as_completed(future_to_acc):
+                acc = future_to_acc[future]
+                try:
+                    res = future.result()
+                    if res:
+                        found_otp, time_diff_sec = res
+                        winning_acc = acc
+                        break
+                except Exception:
+                    pass
+
+        if found_otp and winning_acc:
+            acc_email = winning_acc.split('|')[0].strip() if '|' in winning_acc else winning_acc.strip()
+            log_signal.emit(f"🎯 Bắt được mã OTP từ email '{acc_email}' (Nhận cách đây {time_diff_sec}s): {found_otp}")
+            return found_otp, winning_acc
+
+        time.sleep(round_interval)
+        log_signal.emit(f"⏳ Đang đợi thư OTP về (lần thử {attempt+1}/{max_rounds}) trên {len(account_tokens)} email khôi phục...")
+
+    return None, None
+
+
 # ========================================================
 # CẤU HÌNH & BỘ SINH FAKE FINGERPRINT (CHỐNG QUÉT THIẾT BỊ)
 # ========================================================
@@ -1031,7 +1139,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                 is_almost_there_screen = (
                     "almost there" in content_lower
                     or "just one more step to verify it" in content_lower
-                    or await page.locator("[data-testid='tile']:has-text('Send a code'), [aria-label*='Send a code'], span:has-text('Send a code to')").count() > 0
+                    or await page.locator("span[role='button']:has-text('Send a code'), [data-testid='tile'], [role='group'][aria-label*='Send a code']").count() > 0
                 )
                 if is_almost_there_screen:
                     log_signal.emit("🛡️ Phát hiện màn hình xác thực 'Almost there' (Send a code)...")
@@ -1039,46 +1147,89 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         log_signal.emit("⚠️ Không có email khôi phục nào trong danh sách!")
                         break
 
-                    tile_locator = page.locator("[data-testid='tile']:has-text('Send a code'), [aria-label*='Send a code'], span[role='button']:has-text('Send a code'), div:has-text('Send a code to')").first
+                    # Lấy text hiển thị để nhận diện email che (ví dụ: du*****@hotmail.com)
                     tile_text = ""
                     try:
-                        if await tile_locator.count() > 0:
-                            tile_text = await tile_locator.inner_text()
-                            if not tile_text:
-                                tile_text = await tile_locator.get_attribute("aria-label") or ""
+                        tile_text = await page.locator("span[role='button']:has-text('Send a code'), [data-testid='tile'], [role='group'][aria-label*='Send a code']").first.inner_text()
                     except Exception:
                         pass
+                    if not tile_text:
+                        try:
+                            tile_text = await page.locator("[role='group'][aria-label*='Send a code']").first.get_attribute("aria-label") or ""
+                        except Exception:
+                            pass
+                    if not tile_text:
+                        tile_text = content_lower
 
-                    # Tìm email khôi phục phù hợp từ danh sách recovery_list (so khớp prefix & domain)
-                    masked_prefix = ""
-                    masked_domain = ""
-                    m = re.search(r'([a-zA-Z0-9._%+-]+)\*+@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', tile_text)
-                    if m:
-                        masked_prefix = m.group(1).lower()
-                        masked_domain = m.group(2).lower()
-                        log_signal.emit(f"🔍 Nhận diện email nhận mã: {masked_prefix}*****@{masked_domain}")
+                    # Trích xuất 2 chữ cái đầu (ví dụ: 'du' từ du*****@hotmail.com)
+                    m = re.search(r'Send a code to\s+([a-zA-Z0-9._%+-]+?)\*+@([a-zA-Z0-9.-]+)', tile_text, re.I)
+                    if not m:
+                        m = re.search(r'([a-zA-Z0-9._%+-]+?)\*+@([a-zA-Z0-9.-]+)', tile_text)
 
                     matched_recoveries = []
-                    if masked_prefix and masked_domain:
+                    if m:
+                        masked_prefix = m.group(1).lower().strip()
+                        masked_domain = m.group(2).lower().strip()
+                        prefix_2 = masked_prefix[:2]  # Lấy đúng 2 ký tự đầu theo yêu cầu của Sếp
+                        log_signal.emit(f"🔍 Nhận diện email nhận mã: {masked_prefix}*****@{masked_domain} -> Lọc theo 2 chữ cái đầu: '{prefix_2}'")
+
+                        # Quét tất cả tài khoản trong danh sách khôi phục có 2 chữ cái đầu giống
                         for r in recovery_list:
                             r_email = r.split('|')[0].strip().lower() if '|' in r else r.strip().lower()
-                            if r_email.startswith(masked_prefix) and r_email.endswith('@' + masked_domain):
+                            if r_email.startswith(prefix_2):
                                 matched_recoveries.append(r)
+
+                        log_signal.emit(f"📋 Tìm thấy {len(matched_recoveries)}/{len(recovery_list)} email khôi phục bắt đầu bằng '{prefix_2}' để cùng quét mã")
 
                     if not matched_recoveries:
                         matched_recoveries = recovery_list[:]
 
-                    log_signal.emit("👉 Đang bấm vào 'Send a code'...")
-                    try:
-                        await tile_locator.click(timeout=10000)
-                    except Exception as e:
-                        log_signal.emit(f"⚠️ Thử bấm Send a code: {e}")
-                        await page.evaluate('''() => {
-                            const el = document.querySelector('[data-testid="tile"], [aria-label*="Send a code"], span.fui-Link');
-                            if (el) el.click();
-                        }''')
+                    log_signal.emit("👉 Đang bấm vào thẻ 'Send a code'...")
 
-                    await asyncio.sleep(2)
+                    # Bấm chính xác thẻ Send a code (bằng cả native events lẫn Playwright)
+                    for click_round in range(2):
+                        await page.evaluate("""() => {
+                            const spans = Array.from(document.querySelectorAll('span[role="button"], span.fui-Link'));
+                            for (const s of spans) {
+                                if ((s.textContent || '').toLowerCase().includes('send a code')) {
+                                    s.scrollIntoView();
+                                    s.focus();
+                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                        s.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                                    });
+                                    s.click();
+                                    return;
+                                }
+                            }
+                            const card = document.querySelector('[data-testid="tile"]') || document.querySelector('[role="group"][aria-label*="Send a code"]');
+                            if (card) {
+                                card.scrollIntoView();
+                                card.focus();
+                                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                    card.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                                });
+                                card.click();
+                            }
+                        }""")
+
+                        try:
+                            tile_btn = page.locator("span[role='button']:has-text('Send a code'), [data-testid='tile'], [role='group'][aria-label*='Send a code']").first
+                            if await tile_btn.count() > 0:
+                                await tile_btn.scroll_into_view_if_needed()
+                                await tile_btn.click(force=True, timeout=3000)
+                        except Exception:
+                            pass
+
+                        await asyncio.sleep(2)
+                        # Nếu đã chuyển màn hình (ô OTP hoặc ô email xuất hiện) thì ngưng click
+                        if (
+                            await page.is_visible("input[id^='codeEntry-']")
+                            or await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']")
+                            or await page.is_visible("input#iProofEmail, input[type='email']")
+                        ):
+                            break
+
+                    log_signal.emit("✅ Đã bấm 'Send a code' xong, đang chờ màn hình OTP...")
 
                     # Kiểm tra nếu Microsoft yêu cầu nhập lại toàn bộ email khôi phục để xác nhận
                     email_confirm_input = page.locator("input#iProofEmail, input[type='email'], input[id^='floatingLabelInput'], input.fui-Input__input").first
@@ -1122,26 +1273,21 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         raise MicrosoftSessionResetException("Dính lỗi Something went wrong khi bấm Send a code", failed_recovery=failed_rec)
 
                     if not otp_appeared:
-                        log_signal.emit("⚠️ Chưa thấy ô nhập OTP sau khi bấm Send a code...")
+                        log_signal.emit("⚠️ Chưa thấy ô nhập OTP sau khi bấm Send a code, đang thử lại...")
                         continue
 
-                    # Quét OTP từ email khôi phục
-                    otp_code = None
-                    used_rec_mail = None
-                    for cur_rec in matched_recoveries:
-                        cur_rec_email = cur_rec.split('|')[0].strip() if '|' in cur_rec else cur_rec.strip()
-                        log_signal.emit(f"⏳ Đang đợi OTP từ email: {cur_rec_email}...")
-                        otp_code = get_outlook_otp_via_api(cur_rec, log_signal)
-                        if otp_code:
-                            used_rec_mail = cur_rec_email
-                            break
+                    # Quét tìm OTP đồng thời trên tất cả các tài khoản có 2 ký tự đầu giống
+                    otp_code, winning_rec = await asyncio.to_thread(
+                        scan_all_recovery_accounts_for_otp, matched_recoveries, log_signal, 20, 4
+                    )
 
                     if otp_code:
                         otp_digits = str(otp_code).strip()
                         fluent_otp_inputs = page.locator("input[id^='codeEntry-']")
                         fluent_count = await fluent_otp_inputs.count()
+                        used_mail = winning_rec.split('|')[0].strip() if winning_rec and '|' in winning_rec else (winning_rec or "")
                         if fluent_count > 0:
-                            log_signal.emit(f"🔑 Đang điền OTP {otp_digits} vào {fluent_count} ô từ email {used_rec_mail}...")
+                            log_signal.emit(f"🔑 Đang điền OTP {otp_digits} vào {fluent_count} ô từ email {used_mail}...")
                             for idx, d in enumerate(otp_digits[:fluent_count]):
                                 await page.fill(f"#codeEntry-{idx}", d)
                         else:
@@ -1152,12 +1298,12 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                             if await btn_submit.is_visible():
                                 await btn_submit.click(timeout=10000)
 
-                        log_signal.emit(f"✅ Đã điền mã OTP thành công từ email {used_rec_mail}!")
+                        log_signal.emit(f"✅ Đã điền mã OTP thành công từ email {used_mail}!")
                         await asyncio.sleep(4)
                         break
                     else:
                         failed_rec = matched_recoveries[0] if matched_recoveries else None
-                        log_signal.emit("❌ Không lấy được mã OTP từ các email khôi phục phù hợp.")
+                        log_signal.emit("❌ Đã quét hết các email khôi phục phù hợp nhưng không tìm thấy mã OTP mới.")
                         raise MicrosoftSessionResetException("Không lấy được OTP sau khi Send a code", failed_recovery=failed_rec)
 
                 # Luồng Microsoft Fluent mới có thể đổi chữ nút theo từng bước:
