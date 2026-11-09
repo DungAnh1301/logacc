@@ -1006,11 +1006,13 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tắt Chrome để đổi email khôi phục và chạy lại...")
                     raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 3", failed_recovery=failed_rec)
 
-                # Check nếu hiện màn hình Passkey (FIDO) / Windows Hello
+                # Check nếu hiện màn hình Passkey (FIDO) / Windows Hello (tránh so khớp nhầm script tag)
                 is_passkey_screen = (
                     "fido" in page.url.lower()
-                    or "passkey" in content.lower()
-                    or "setting up your passkey" in content.lower()
+                    or "setting up your passkey" in content_lower
+                    or "create a passkey" in content_lower
+                    or "save a passkey" in content_lower
+                    or "sign in with a passkey" in content_lower
                 )
                 if is_passkey_screen:
                     log_signal.emit("🛡️ Phát hiện màn hình Passkey, đang tự động bấm Cancel / Skip để bỏ qua...")
@@ -1022,6 +1024,141 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                             continue
                     except Exception as e:
                         log_signal.emit(f"⚠️ Thử bấm Cancel Passkey: {e}")
+
+                # ==========================================================
+                # XỬ LÝ MÀN HÌNH "Almost there" / "Send a code to du*****@..."
+                # ==========================================================
+                is_almost_there_screen = (
+                    "almost there" in content_lower
+                    or "just one more step to verify it" in content_lower
+                    or await page.locator("[data-testid='tile']:has-text('Send a code'), [aria-label*='Send a code'], span:has-text('Send a code to')").count() > 0
+                )
+                if is_almost_there_screen:
+                    log_signal.emit("🛡️ Phát hiện màn hình xác thực 'Almost there' (Send a code)...")
+                    if not recovery_list:
+                        log_signal.emit("⚠️ Không có email khôi phục nào trong danh sách!")
+                        break
+
+                    tile_locator = page.locator("[data-testid='tile']:has-text('Send a code'), [aria-label*='Send a code'], span[role='button']:has-text('Send a code'), div:has-text('Send a code to')").first
+                    tile_text = ""
+                    try:
+                        if await tile_locator.count() > 0:
+                            tile_text = await tile_locator.inner_text()
+                            if not tile_text:
+                                tile_text = await tile_locator.get_attribute("aria-label") or ""
+                    except Exception:
+                        pass
+
+                    # Tìm email khôi phục phù hợp từ danh sách recovery_list (so khớp prefix & domain)
+                    masked_prefix = ""
+                    masked_domain = ""
+                    m = re.search(r'([a-zA-Z0-9._%+-]+)\*+@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})', tile_text)
+                    if m:
+                        masked_prefix = m.group(1).lower()
+                        masked_domain = m.group(2).lower()
+                        log_signal.emit(f"🔍 Nhận diện email nhận mã: {masked_prefix}*****@{masked_domain}")
+
+                    matched_recoveries = []
+                    if masked_prefix and masked_domain:
+                        for r in recovery_list:
+                            r_email = r.split('|')[0].strip().lower() if '|' in r else r.strip().lower()
+                            if r_email.startswith(masked_prefix) and r_email.endswith('@' + masked_domain):
+                                matched_recoveries.append(r)
+
+                    if not matched_recoveries:
+                        matched_recoveries = recovery_list[:]
+
+                    log_signal.emit("👉 Đang bấm vào 'Send a code'...")
+                    try:
+                        await tile_locator.click(timeout=10000)
+                    except Exception as e:
+                        log_signal.emit(f"⚠️ Thử bấm Send a code: {e}")
+                        await page.evaluate('''() => {
+                            const el = document.querySelector('[data-testid="tile"], [aria-label*="Send a code"], span.fui-Link');
+                            if (el) el.click();
+                        }''')
+
+                    await asyncio.sleep(2)
+
+                    # Kiểm tra nếu Microsoft yêu cầu nhập lại toàn bộ email khôi phục để xác nhận
+                    email_confirm_input = page.locator("input#iProofEmail, input[type='email'], input[id^='floatingLabelInput'], input.fui-Input__input").first
+                    if await email_confirm_input.is_visible():
+                        active_rec = matched_recoveries[0]
+                        rec_mail_clean = active_rec.split('|')[0].strip() if '|' in active_rec else active_rec.strip()
+                        log_signal.emit(f"✍️ Đang nhập xác nhận email khôi phục: {rec_mail_clean}")
+                        await email_confirm_input.fill("")
+                        await email_confirm_input.fill(rec_mail_clean)
+                        await asyncio.sleep(0.5)
+                        btn_next = page.locator("button[data-testid='primaryButton'], button[type='submit'], #iSelectProofAction, input[value='Send code'], button:has-text('Send code'), button:has-text('Next')").first
+                        if await btn_next.is_visible():
+                            await btn_next.click(timeout=10000)
+                            await asyncio.sleep(2)
+
+                    # Chờ ô nhập OTP xuất hiện
+                    otp_appeared = False
+                    hit_sww = False
+                    for _ in range(15):
+                        await pause_event.wait()
+                        if (
+                            await page.is_visible("input[id^='codeEntry-']")
+                            or await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']")
+                        ):
+                            otp_appeared = True
+                            break
+                        check_c = (await safe_page_content(page)).lower()
+                        if (
+                            "something went wrong" in check_c 
+                            or "we can't complete your request right now" in check_c 
+                            or "try again later" in check_c 
+                            or "there's a temporary problem" in check_c
+                        ):
+                            hit_sww = True
+                            break
+                        await asyncio.sleep(1)
+
+                    if hit_sww:
+                        failed_rec = matched_recoveries[0] if matched_recoveries else None
+                        log_signal.emit("🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi mã OTP. Đang tắt Chrome để thử lại...")
+                        raise MicrosoftSessionResetException("Dính lỗi Something went wrong khi bấm Send a code", failed_recovery=failed_rec)
+
+                    if not otp_appeared:
+                        log_signal.emit("⚠️ Chưa thấy ô nhập OTP sau khi bấm Send a code...")
+                        continue
+
+                    # Quét OTP từ email khôi phục
+                    otp_code = None
+                    used_rec_mail = None
+                    for cur_rec in matched_recoveries:
+                        cur_rec_email = cur_rec.split('|')[0].strip() if '|' in cur_rec else cur_rec.strip()
+                        log_signal.emit(f"⏳ Đang đợi OTP từ email: {cur_rec_email}...")
+                        otp_code = get_outlook_otp_via_api(cur_rec, log_signal)
+                        if otp_code:
+                            used_rec_mail = cur_rec_email
+                            break
+
+                    if otp_code:
+                        otp_digits = str(otp_code).strip()
+                        fluent_otp_inputs = page.locator("input[id^='codeEntry-']")
+                        fluent_count = await fluent_otp_inputs.count()
+                        if fluent_count > 0:
+                            log_signal.emit(f"🔑 Đang điền OTP {otp_digits} vào {fluent_count} ô từ email {used_rec_mail}...")
+                            for idx, d in enumerate(otp_digits[:fluent_count]):
+                                await page.fill(f"#codeEntry-{idx}", d)
+                        else:
+                            single_otp_input = page.locator("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']").first
+                            await single_otp_input.fill("")
+                            await single_otp_input.fill(otp_digits)
+                            btn_submit = page.locator("button[data-testid='primaryButton'], button[type='submit'], #iNext, #idSIButton9").first
+                            if await btn_submit.is_visible():
+                                await btn_submit.click(timeout=10000)
+
+                        log_signal.emit(f"✅ Đã điền mã OTP thành công từ email {used_rec_mail}!")
+                        await asyncio.sleep(4)
+                        break
+                    else:
+                        failed_rec = matched_recoveries[0] if matched_recoveries else None
+                        log_signal.emit("❌ Không lấy được mã OTP từ các email khôi phục phù hợp.")
+                        raise MicrosoftSessionResetException("Không lấy được OTP sau khi Send a code", failed_recovery=failed_rec)
 
                 # Luồng Microsoft Fluent mới có thể đổi chữ nút theo từng bước:
                 # 1) Help protect your account -> Add email
@@ -1280,7 +1417,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 4", failed_recovery=failed_rec)
 
                     # Bỏ qua màn hình Passkey nếu xuất hiện ở bước này
-                    if "fido" in page.url.lower() or "passkey" in content_b4:
+                    if "fido" in page.url.lower() or "setting up your passkey" in content_b4 or "create a passkey" in content_b4:
                         btn_cancel = page.locator("button:has-text('Cancel'), input[value='Cancel'], #idBtn_Back, button:has-text('Hủy'), a:has-text('Cancel')")
                         if await btn_cancel.count() > 0:
                             await btn_cancel.first.click(timeout=3000)
