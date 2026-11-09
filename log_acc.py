@@ -463,6 +463,16 @@ def check_account_otp_quick(access_token):
     return None
 
 
+def get_single_outlook_otp(recovery_acc_str, max_age_seconds=60):
+    token = get_graph_access_token_quick(recovery_acc_str)
+    if not token:
+        return None
+    res = check_account_otp_quick(token)
+    if res:
+        return res[0]
+    return None
+
+
 def scan_all_recovery_accounts_for_otp(candidate_accounts, log_signal, max_rounds=20, round_interval=4):
     import concurrent.futures
     log_signal.emit(f"🔄 Đang kết nối API đồng thời cho {len(candidate_accounts)} email khôi phục phù hợp...")
@@ -1184,127 +1194,186 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     if not matched_recoveries:
                         matched_recoveries = recovery_list[:]
 
-                    log_signal.emit("👉 Đang bấm vào thẻ 'Send a code'...")
+                    recovery_verified = False
 
-                    # Bấm chính xác thẻ Send a code (bằng cả native events lẫn Playwright)
-                    for click_round in range(2):
-                        await page.evaluate("""() => {
-                            const spans = Array.from(document.querySelectorAll('span[role="button"], span.fui-Link'));
-                            for (const s of spans) {
-                                if ((s.textContent || '').toLowerCase().includes('send a code')) {
-                                    s.scrollIntoView();
-                                    s.focus();
-                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
-                                        s.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
-                                    });
-                                    s.click();
-                                    return;
-                                }
-                            }
-                            const card = document.querySelector('[data-testid="tile"]') || document.querySelector('[role="group"][aria-label*="Send a code"]');
-                            if (card) {
-                                card.scrollIntoView();
-                                card.focus();
-                                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
-                                    card.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
-                                });
-                                card.click();
-                            }
-                        }""")
+                    # Thử tuần tự từng email trong danh sách khớp 2 ký tự đầu
+                    for rec_idx, cur_recovery in enumerate(matched_recoveries):
+                        cur_email = cur_recovery.split('|')[0].strip() if '|' in cur_recovery else cur_recovery.strip()
+                        log_signal.emit(f"📧 [Email {rec_idx+1}/{len(matched_recoveries)}] Thử xác thực với email: {cur_email}")
 
-                        try:
-                            tile_btn = page.locator("span[role='button']:has-text('Send a code'), [data-testid='tile'], [role='group'][aria-label*='Send a code']").first
-                            if await tile_btn.count() > 0:
-                                await tile_btn.scroll_into_view_if_needed()
-                                await tile_btn.click(force=True, timeout=3000)
-                        except Exception:
-                            pass
-
-                        await asyncio.sleep(2)
-                        # Nếu đã chuyển màn hình (ô OTP hoặc ô email xuất hiện) thì ngưng click
-                        if (
+                        # 1. Đảm bảo đang ở màn hình Send a code (nếu đang ở màn hình OTP thì bấm Back)
+                        is_on_otp_or_confirm = (
                             await page.is_visible("input[id^='codeEntry-']")
                             or await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']")
                             or await page.is_visible("input#iProofEmail, input[type='email']")
-                        ):
-                            break
-
-                    log_signal.emit("✅ Đã bấm 'Send a code' xong, đang chờ màn hình OTP...")
-
-                    # Kiểm tra nếu Microsoft yêu cầu nhập lại toàn bộ email khôi phục để xác nhận
-                    email_confirm_input = page.locator("input#iProofEmail, input[type='email'], input[id^='floatingLabelInput'], input.fui-Input__input").first
-                    if await email_confirm_input.is_visible():
-                        active_rec = matched_recoveries[0]
-                        rec_mail_clean = active_rec.split('|')[0].strip() if '|' in active_rec else active_rec.strip()
-                        log_signal.emit(f"✍️ Đang nhập xác nhận email khôi phục: {rec_mail_clean}")
-                        await email_confirm_input.fill("")
-                        await email_confirm_input.fill(rec_mail_clean)
-                        await asyncio.sleep(0.5)
-                        btn_next = page.locator("button[data-testid='primaryButton'], button[type='submit'], #iSelectProofAction, input[value='Send code'], button:has-text('Send code'), button:has-text('Next')").first
-                        if await btn_next.is_visible():
-                            await btn_next.click(timeout=10000)
+                        )
+                        if is_on_otp_or_confirm:
+                            log_signal.emit("🔙 Đang bấm nút Back để quay lại danh sách chọn gửi mã...")
+                            await page.evaluate("""() => {
+                                const b = document.getElementById('back-button') || document.querySelector('[data-testid="leftArrowIcon"]') || document.querySelector('button[aria-label="Back"]');
+                                if (b) {
+                                    b.scrollIntoView();
+                                    b.click();
+                                }
+                            }""")
+                            try:
+                                back_loc = page.locator("#back-button, button[data-testid='leftArrowIcon'], button[aria-label='Back']").first
+                                if await back_loc.count() > 0:
+                                    await back_loc.click(force=True, timeout=3000)
+                            except Exception:
+                                pass
                             await asyncio.sleep(2)
 
-                    # Chờ ô nhập OTP xuất hiện
-                    otp_appeared = False
-                    hit_sww = False
-                    for _ in range(15):
-                        await pause_event.wait()
-                        if (
-                            await page.is_visible("input[id^='codeEntry-']")
-                            or await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']")
-                        ):
-                            otp_appeared = True
+                        # 2. Bấm vào thẻ "Send a code to du*****@..."
+                        log_signal.emit("👉 Đang bấm vào thẻ 'Send a code'...")
+                        for click_round in range(2):
+                            await page.evaluate("""() => {
+                                const spans = Array.from(document.querySelectorAll('span[role="button"], span.fui-Link'));
+                                for (const s of spans) {
+                                    if ((s.textContent || '').toLowerCase().includes('send a code')) {
+                                        s.scrollIntoView();
+                                        s.focus();
+                                        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                            s.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                                        });
+                                        s.click();
+                                        return;
+                                    }
+                                }
+                                const card = document.querySelector('[data-testid="tile"]') || document.querySelector('[role="group"][aria-label*="Send a code"]');
+                                if (card) {
+                                    card.scrollIntoView();
+                                    card.focus();
+                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                        card.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                                    });
+                                    card.click();
+                                }
+                            }""")
+
+                            try:
+                                tile_btn = page.locator("span[role='button']:has-text('Send a code'), [data-testid='tile'], [role='group'][aria-label*='Send a code']").first
+                                if await tile_btn.count() > 0:
+                                    await tile_btn.scroll_into_view_if_needed()
+                                    await tile_btn.click(force=True, timeout=3000)
+                            except Exception:
+                                pass
+
+                            await asyncio.sleep(2)
+                            if (
+                                await page.is_visible("input[id^='codeEntry-']")
+                                or await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']")
+                                or await page.is_visible("input#iProofEmail, input[type='email']")
+                            ):
+                                break
+
+                        # 3. Kiểm tra nếu có ô xác nhận lại email khôi phục thì điền cur_email
+                        email_confirm_input = page.locator("input#iProofEmail, input[type='email'], input[id^='floatingLabelInput'], input.fui-Input__input").first
+                        if await email_confirm_input.is_visible():
+                            log_signal.emit(f"✍️ Đang nhập email xác nhận: {cur_email}")
+                            await email_confirm_input.fill("")
+                            await email_confirm_input.fill(cur_email)
+                            await asyncio.sleep(0.5)
+                            btn_next = page.locator("button[data-testid='primaryButton'], button[type='submit'], #iSelectProofAction, input[value='Send code'], button:has-text('Send code'), button:has-text('Next')").first
+                            if await btn_next.is_visible():
+                                await btn_next.click(timeout=10000)
+                                await asyncio.sleep(2)
+
+                        # 4. Chờ màn hình nhập OTP xuất hiện
+                        otp_appeared = False
+                        hit_sww = False
+                        for _ in range(12):
+                            await pause_event.wait()
+                            if (
+                                await page.is_visible("input[id^='codeEntry-']")
+                                or await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']")
+                            ):
+                                otp_appeared = True
+                                break
+                            check_c = (await safe_page_content(page)).lower()
+                            if (
+                                "something went wrong" in check_c 
+                                or "we can't complete your request right now" in check_c 
+                                or "try again later" in check_c 
+                                or "there's a temporary problem" in check_c
+                            ):
+                                hit_sww = True
+                                break
+                            await asyncio.sleep(1)
+
+                        if hit_sww:
+                            log_signal.emit(f"🛑 [Microsoft] Dính lỗi 'Something went wrong' khi gửi mã cho email {cur_email}.")
+                            raise MicrosoftSessionResetException("Dính lỗi Something went wrong khi bấm Send a code", failed_recovery=cur_recovery)
+
+                        if not otp_appeared:
+                            log_signal.emit(f"⚠️ Chưa mở được ô OTP cho email {cur_email}, bấm Back để thử email khác...")
+                            await page.evaluate("""() => {
+                                const b = document.getElementById('back-button') || document.querySelector('[data-testid="leftArrowIcon"]') || document.querySelector('button[aria-label="Back"]');
+                                if (b) b.click();
+                            }""")
+                            await asyncio.sleep(2)
+                            continue
+
+                        # 5. Kiểm tra OTP đúng 5 lần trên cur_recovery
+                        log_signal.emit(f"⏳ Đang đợi OTP về hộp thư {cur_email} (kiểm tra 5 lần)...")
+                        otp_code = None
+                        for poll_attempt in range(5):
+                            await pause_event.wait()
+                            log_signal.emit(f"🔍 [Lần {poll_attempt+1}/5] Quét hộp thư {cur_email} tìm OTP...")
+                            otp_code = await asyncio.to_thread(get_single_outlook_otp, cur_recovery, 60)
+                            if otp_code:
+                                log_signal.emit(f"🎯 Bắt được mã OTP từ email '{cur_email}': {otp_code}")
+                                break
+                            await asyncio.sleep(3.5)
+
+                        # 6. Nếu có mã OTP -> Điền vào và hoàn tất!
+                        if otp_code:
+                            otp_digits = str(otp_code).strip()
+                            fluent_otp_inputs = page.locator("input[id^='codeEntry-']")
+                            fluent_count = await fluent_otp_inputs.count()
+                            if fluent_count > 0:
+                                log_signal.emit(f"🔑 Đang điền OTP {otp_digits} vào {fluent_count} ô...")
+                                for idx, d in enumerate(otp_digits[:fluent_count]):
+                                    await page.fill(f"#codeEntry-{idx}", d)
+                            else:
+                                single_otp_input = page.locator("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']").first
+                                await single_otp_input.fill("")
+                                await single_otp_input.fill(otp_digits)
+                                btn_submit = page.locator("button[data-testid='primaryButton'], button[type='submit'], #iNext, #idSIButton9").first
+                                if await btn_submit.is_visible():
+                                    await btn_submit.click(timeout=10000)
+
+                            log_signal.emit(f"✅ Đã điền mã OTP thành công từ email {cur_email}!")
+                            await asyncio.sleep(4)
+                            recovery_verified = True
                             break
-                        check_c = (await safe_page_content(page)).lower()
-                        if (
-                            "something went wrong" in check_c 
-                            or "we can't complete your request right now" in check_c 
-                            or "try again later" in check_c 
-                            or "there's a temporary problem" in check_c
-                        ):
-                            hit_sww = True
-                            break
-                        await asyncio.sleep(1)
-
-                    if hit_sww:
-                        failed_rec = matched_recoveries[0] if matched_recoveries else None
-                        log_signal.emit("🛑 [Microsoft] Bị dính lỗi 'Something went wrong' khi gửi mã OTP. Đang tắt Chrome để thử lại...")
-                        raise MicrosoftSessionResetException("Dính lỗi Something went wrong khi bấm Send a code", failed_recovery=failed_rec)
-
-                    if not otp_appeared:
-                        log_signal.emit("⚠️ Chưa thấy ô nhập OTP sau khi bấm Send a code, đang thử lại...")
-                        continue
-
-                    # Quét tìm OTP đồng thời trên tất cả các tài khoản có 2 ký tự đầu giống
-                    otp_code, winning_rec = await asyncio.to_thread(
-                        scan_all_recovery_accounts_for_otp, matched_recoveries, log_signal, 20, 4
-                    )
-
-                    if otp_code:
-                        otp_digits = str(otp_code).strip()
-                        fluent_otp_inputs = page.locator("input[id^='codeEntry-']")
-                        fluent_count = await fluent_otp_inputs.count()
-                        used_mail = winning_rec.split('|')[0].strip() if winning_rec and '|' in winning_rec else (winning_rec or "")
-                        if fluent_count > 0:
-                            log_signal.emit(f"🔑 Đang điền OTP {otp_digits} vào {fluent_count} ô từ email {used_mail}...")
-                            for idx, d in enumerate(otp_digits[:fluent_count]):
-                                await page.fill(f"#codeEntry-{idx}", d)
                         else:
-                            single_otp_input = page.locator("input[type='tel'], input[name='otc'], input[id*='otc'], input[id*='Code']").first
-                            await single_otp_input.fill("")
-                            await single_otp_input.fill(otp_digits)
-                            btn_submit = page.locator("button[data-testid='primaryButton'], button[type='submit'], #iNext, #idSIButton9").first
-                            if await btn_submit.is_visible():
-                                await btn_submit.click(timeout=10000)
+                            # 7. Quá 5 lần không có OTP -> Bấm nút Back để thử email tiếp theo
+                            log_signal.emit(f"⚠️ Email {cur_email} không có OTP sau 5 lần kiểm tra. Đang bấm nút Back để thử email tiếp theo...")
+                            await page.evaluate("""() => {
+                                const b = document.getElementById('back-button') || document.querySelector('[data-testid="leftArrowIcon"]') || document.querySelector('button[aria-label="Back"]');
+                                if (b) {
+                                    b.scrollIntoView();
+                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evtType => {
+                                        b.dispatchEvent(new MouseEvent(evtType, { bubbles: true, cancelable: true, view: window }));
+                                    });
+                                    b.click();
+                                }
+                            }""")
+                            try:
+                                back_loc = page.locator("#back-button, button[data-testid='leftArrowIcon'], button[aria-label='Back']").first
+                                if await back_loc.count() > 0:
+                                    await back_loc.click(force=True, timeout=3000)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2.5)
 
-                        log_signal.emit(f"✅ Đã điền mã OTP thành công từ email {used_mail}!")
-                        await asyncio.sleep(4)
+                    if recovery_verified:
                         break
                     else:
                         failed_rec = matched_recoveries[0] if matched_recoveries else None
-                        log_signal.emit("❌ Đã quét hết các email khôi phục phù hợp nhưng không tìm thấy mã OTP mới.")
-                        raise MicrosoftSessionResetException("Không lấy được OTP sau khi Send a code", failed_recovery=failed_rec)
+                        log_signal.emit("❌ Đã thử tất cả các email khôi phục phù hợp nhưng không email nào có mã OTP.")
+                        raise MicrosoftSessionResetException("Đã thử hết email khôi phục mà không có OTP", failed_recovery=failed_rec)
 
                 # Luồng Microsoft Fluent mới có thể đổi chữ nút theo từng bước:
                 # 1) Help protect your account -> Add email
