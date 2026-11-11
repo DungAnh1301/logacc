@@ -3151,12 +3151,18 @@ class MainWindow(QWidget):
         """)
         self.recovery_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+        self.btn_get_recovery_otp = QPushButton("📩 Lấy OTP")
+        self.btn_get_recovery_otp.setStyleSheet("padding: 8px 12px; background-color: #0288d1; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_get_recovery_otp.setToolTip("Lấy mã OTP thủ công cho email khôi phục đang được chọn")
+        self.btn_get_recovery_otp.clicked.connect(self.fetch_recovery_otp_manual)
+
         self.btn_manage_recovery = QPushButton("📋 Danh Sách Email")
         self.btn_manage_recovery.setStyleSheet("padding: 8px 12px; background-color: #00796b; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_manage_recovery.clicked.connect(self.open_recovery_dialog)
 
         recovery_layout.addWidget(QLabel("<b>Email Khôi Phục:</b>"))
         recovery_layout.addWidget(self.recovery_combo, stretch=1)
+        recovery_layout.addWidget(self.btn_get_recovery_otp)
         recovery_layout.addWidget(self.btn_manage_recovery)
         main_layout.addLayout(recovery_layout)
 
@@ -3563,6 +3569,45 @@ class MainWindow(QWidget):
 
     def on_recovery_email_changed(self, new_email_str):
         self.refresh_recovery_combo(select_email=new_email_str)
+
+    def fetch_recovery_otp_manual(self):
+        """Lấy OTP thủ công cho email khôi phục đang được chọn trong recovery_combo"""
+        rec_text = self.recovery_combo.currentText().strip()
+        if not rec_text:
+            self.log_output.append("⚠️ Vui lòng chọn hoặc nhập email khôi phục để lấy OTP!")
+            return
+
+        em, _, _ = extract_email_and_password(rec_text)
+        show_em = em or "email khôi phục"
+        
+        outh2, client_id = parse_oauth2_and_client_id(rec_text)
+        if not outh2:
+            self.log_output.append(f"❌ Không tìm thấy mã OAuth2 trong email khôi phục '{show_em}' (cần tk|mk|outh2|clientId)!")
+            return
+
+        target_str = f"dummy|dummy|{outh2}|{client_id}"
+        self.log_output.append(f"🔍 [Thủ công] Đang quét tìm mã OTP mới cho email khôi phục: {show_em}...")
+        
+        def run():
+            class ThreadSignal:
+                def __init__(self, emit_fn):
+                    self.emit_fn = emit_fn
+                def emit(self, msg):
+                    self.emit_fn(msg)
+
+            sig = ThreadSignal(self.background_log_signal.emit)
+            try:
+                otp = get_outlook_otp_via_api(target_str, sig)
+                if otp:
+                    self.background_log_signal.emit(f"🎯 [Thủ công] Bắt được mã OTP: {otp}")
+                    QApplication.clipboard().setText(otp)
+                    self.background_log_signal.emit(f"📋 Đã tự động copy OTP {otp} vào bộ nhớ tạm thành công!")
+                else:
+                    self.background_log_signal.emit(f"⚠️ [Thủ công] Không tìm thấy mã OTP nào trong hộp thư của {show_em}!")
+            except Exception as e:
+                self.background_log_signal.emit(f"❌ [Thủ công] Lỗi khi lấy OTP: {str(e)}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def open_recovery_dialog(self):
         dlg = RecoveryEmailsDialog(self)
