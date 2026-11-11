@@ -2027,6 +2027,123 @@ class TargetAccountsDialog(QDialog):
         self.accept()
 
 
+class ResultsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Danh Sách Toàn Bộ Kết Quả Đã Lấy (results.txt)")
+        self.resize(800, 520)
+        self.setStyleSheet("""
+            QDialog { background-color: #121212; color: #ffffff; }
+            QLabel { color: #e0e0e0; font-size: 13px; }
+            QTextEdit { background-color: #1e1e1e; color: #81c784; border: 1px solid #333; border-radius: 4px; font-family: Consolas, monospace; font-size: 12px; }
+            QPushButton { border-radius: 4px; padding: 8px 16px; font-weight: bold; }
+        """)
+
+        layout = QVBoxLayout(self)
+        
+        results = self.load_all_results()
+        count_lbl = f"<b>Tổng số tài khoản đã lấy thành công: <span style='color: #4caf50;'>{len(results)}</span> kết quả</b>"
+        layout.addWidget(QLabel(count_lbl))
+
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText("\n".join(results))
+        layout.addWidget(self.text_edit)
+
+        btn_layout = QHBoxLayout()
+        
+        self.btn_copy_all = QPushButton("📋 Copy Tất Cả")
+        self.btn_copy_all.setStyleSheet("background-color: #2e7d32; color: white;")
+        self.btn_copy_all.clicked.connect(self.copy_all)
+
+        self.btn_open_file = QPushButton("📁 Mở File .txt")
+        self.btn_open_file.setStyleSheet("background-color: #1565c0; color: white;")
+        self.btn_open_file.clicked.connect(self.open_file_in_editor)
+
+        self.btn_clear = QPushButton("🗑️ Xóa Lịch Sử")
+        self.btn_clear.setStyleSheet("background-color: #c62828; color: white;")
+        self.btn_clear.clicked.connect(self.clear_results)
+
+        self.btn_close = QPushButton("Đóng")
+        self.btn_close.setStyleSheet("background-color: #424242; color: white;")
+        self.btn_close.clicked.connect(self.accept)
+
+        btn_layout.addWidget(self.btn_copy_all)
+        btn_layout.addWidget(self.btn_open_file)
+        btn_layout.addWidget(self.btn_clear)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_close)
+        layout.addLayout(btn_layout)
+
+    def load_all_results(self):
+        candidate_paths = [
+            RESULTS_FILE,
+            os.path.join(APP_DIR, "results.txt"),
+            os.path.join(APP_DIR, "dist", "results.txt"),
+            os.path.join(os.path.dirname(APP_DIR), "results.txt"),
+            r"E:\Outh2 hotmail\results.txt",
+            r"E:\Outh2 hotmail\dist\results.txt",
+        ]
+        for p in candidate_paths:
+            if p and os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        lines = [l.strip() for l in f if l.strip()]
+                        if lines:
+                            return lines
+                except Exception:
+                    pass
+        return []
+
+    def copy_all(self):
+        text = self.text_edit.toPlainText().strip()
+        if text:
+            QApplication.clipboard().setText(text)
+            QMessageBox.information(self, "Thông báo", "Đã copy toàn bộ kết quả vào bộ nhớ tạm!")
+        else:
+            QMessageBox.warning(self, "Thông báo", "Chưa có kết quả nào để copy!")
+
+    def open_file_in_editor(self):
+        target = RESULTS_FILE if os.path.isfile(RESULTS_FILE) else (r"E:\Outh2 hotmail\results.txt" if os.path.isfile(r"E:\Outh2 hotmail\results.txt") else None)
+        if not target or not os.path.isfile(target):
+            target = RESULTS_FILE
+            try:
+                with open(target, "w", encoding="utf-8") as f:
+                    f.write(self.text_edit.toPlainText().strip())
+            except Exception:
+                pass
+        try:
+            if sys.platform == "win32":
+                os.startfile(target)
+            else:
+                subprocess.run(["xdg-open", target])
+        except Exception as e:
+            QMessageBox.warning(self, "Lỗi", f"Không thể mở file: {e}")
+
+    def clear_results(self):
+        res = QMessageBox.question(self, "Xác nhận", "Bạn có chắc chắn muốn xóa toàn bộ lịch sử kết quả trong results.txt không?",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if res == QMessageBox.StandardButton.Yes:
+            candidate_paths = [
+                RESULTS_FILE,
+                os.path.join(APP_DIR, "results.txt"),
+                os.path.join(APP_DIR, "dist", "results.txt"),
+                os.path.join(os.path.dirname(APP_DIR), "results.txt"),
+                r"E:\Outh2 hotmail\results.txt",
+                r"E:\Outh2 hotmail\dist\results.txt",
+            ]
+            for p in candidate_paths:
+                if p and os.path.isfile(p):
+                    try:
+                        with open(p, "w", encoding="utf-8") as f:
+                            f.write("")
+                    except Exception:
+                        pass
+            self.text_edit.clear()
+            if self.parent() and hasattr(self.parent(), "refresh_acc_combo"):
+                self.parent().refresh_acc_combo()
+            QMessageBox.information(self, "Thông báo", "Đã xóa toàn bộ kết quả cũ!")
+
+
 class RecoveryEmailsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3056,7 +3173,13 @@ class MainWindow(QWidget):
         
         btn_copy_res = QPushButton("Copy kết quả")
         btn_copy_res.setStyleSheet("background-color: #2e7d32; color: white; padding: 6px 12px; border-radius: 4px; font-weight: bold;")
+        btn_copy_res.setToolTip("Copy kết quả của tài khoản vừa chạy")
         btn_copy_res.clicked.connect(self.copy_result)
+
+        btn_all_results = QPushButton("📋 Tất Cả Kết Quả")
+        btn_all_results.setStyleSheet("background-color: #00796b; color: white; padding: 6px 12px; border-radius: 4px; font-weight: bold;")
+        btn_all_results.setToolTip("Mở danh sách toàn bộ kết quả đã lấy thành công trong results.txt")
+        btn_all_results.clicked.connect(self.open_results_dialog)
 
         btn_get_otp_top = QPushButton("Lấy OTP")
         btn_get_otp_top.setStyleSheet("background-color: #0288d1; color: white; padding: 6px 12px; border-radius: 4px; font-weight: bold;")
@@ -3064,6 +3187,7 @@ class MainWindow(QWidget):
         
         row1.addWidget(self.result_output)
         row1.addWidget(btn_copy_res)
+        row1.addWidget(btn_all_results)
         row1.addWidget(btn_get_otp_top)
         result_container.addLayout(row1)
         main_layout.addLayout(result_container)
@@ -3273,6 +3397,10 @@ class MainWindow(QWidget):
         if dlg.exec():
             self.refresh_acc_combo()
             self.log_output.append(f"📋 Đã cập nhật danh sách tài khoản ({len(load_target_accounts())} tài khoản).")
+
+    def open_results_dialog(self):
+        dlg = ResultsDialog(self)
+        dlg.exec()
 
     def load_settings_to_gui(self):
         cfg = load_gui_config()
