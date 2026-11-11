@@ -252,7 +252,9 @@ def clean_account_string(raw_str):
 def extract_email_and_password(raw_str):
     """
     Tự động nhận diện tài khoản email và mật khẩu email từ chuỗi phân tách bằng dấu '|'.
-    - Dấu hiệu nhận diện email: chứa ký tự '@' và có tên miền (như .com, .net, hotmail, outlook, gmail...)
+    Hỗ trợ cả chuỗi đầy đủ nhiều trường: userid|mk_tiktok|email_hotmail|mk_hotmail|token_cũ|clientId|ngày
+    hoặc dạng đơn giản: email|mk
+    - Ưu tiên tìm email Microsoft (@hotmail, @outlook, @live, @msn...)
     - Mật khẩu email: nằm ngay ở vị trí tiếp theo sau vị trí của email (parts[i+1]).
     Trả về: (email, password, email_index) hoặc (None, None, -1) nếu không tìm thấy.
     """
@@ -264,27 +266,29 @@ def extract_email_and_password(raw_str):
     if not parts:
         return None, None, -1
     
-    # Tìm phần tử là email: có '@' và dấu chấm tên miền sau '@' (như .com)
-    email_idx = -1
+    # 1. Ưu tiên tìm email Microsoft (hotmail, outlook, live, msn, windowslive...)
     for idx, part in enumerate(parts):
         lower_part = part.lower()
         if '@' in lower_part:
             domain_part = lower_part.split('@')[-1]
-            if '.com' in domain_part or '.' in domain_part:
-                email_idx = idx
-                break
-                
-    if email_idx != -1:
-        email = parts[email_idx]
-        password = parts[email_idx + 1] if (email_idx + 1 < len(parts)) else ""
-        return email, password, email_idx
-        
-    # Dự phòng nếu chuỗi có 2 phần tk|mk mà thiếu @
+            if any(dom in domain_part for dom in ['hotmail', 'outlook', 'live', 'msn', 'windowslive']):
+                email = parts[idx]
+                password = parts[idx + 1] if (idx + 1 < len(parts)) else ""
+                return email, password, idx
+
+    # 2. Tìm bất kỳ chuỗi email nào có cấu trúc hợp lệ (name@domain.tld)
+    email_regex = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
+    for idx, part in enumerate(parts):
+        if email_regex.match(part.strip()):
+            email = parts[idx]
+            password = parts[idx + 1] if (idx + 1 < len(parts)) else ""
+            return email, password, idx
+
+    # 3. Dự phòng nếu chuỗi có 2 phần tk|mk mà thiếu @
     if len(parts) >= 2:
         return parts[0], parts[1], 0
     elif len(parts) == 1:
         return parts[0], "", 0
-        
     return None, None, -1
 
 # --- HÀM TỰ ĐỘNG ĐÓNG POPUP / TOOLTIP "GOT IT" / "ĐÃ HIỂU" TRÊN TIKTOK ---
@@ -1988,10 +1992,11 @@ class TargetAccountsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         
-        lbl_info = QLabel("<b>Nhập danh sách tài khoản Hotmail cần lấy (mỗi dòng: tk|mk):</b><br>"
-                          "<span style='color: #aaa;'>Ví dụ: email1@hotmail.com|password123<br>"
-                          "Tool sẽ nạp danh sách lên giao diện, tự động đánh dấu <b>✅ [OK]</b> khi hoàn thành, "
-                          "và tự động chuyển sang tài khoản tiếp theo khi bấm STOP. Bạn vẫn có thể bấm chọn lại tài khoản bất kỳ lúc nào để check lại.</span>")
+        lbl_info = QLabel("<b>Nhập danh sách tài khoản cần lấy (mỗi dòng 1 tài khoản):</b><br>"
+                          "<span style='color: #4fc3f7;'><b>Hỗ trợ mọi định dạng:</b><br>"
+                          "• Định dạng đầy đủ (nhiều dấu gạch đứng |||||): <code>userid|mk_tiktok|email_hotmail|mk_hotmail|token_cũ|clientId|ngày</code><br>"
+                          "• Định dạng đơn giản: <code>email_hotmail|mk_hotmail</code><br>"
+                          "Tool sẽ <b>giữ nguyên 100% toàn bộ chuỗi gốc</b> của bạn, tự động bóc tách chính xác email và mật khẩu Hotmail để chạy!</span>")
         lbl_info.setWordWrap(True)
         layout.addWidget(lbl_info)
 
@@ -2934,7 +2939,7 @@ class MainWindow(QWidget):
         """)
         self.acc_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.acc_input = self.acc_combo.lineEdit()
-        self.acc_input.setPlaceholderText("Nhập hoặc chọn tk|mk Hotmail cần lấy OAuth2...")
+        self.acc_input.setPlaceholderText("Dán hoặc chọn tài khoản (hỗ trợ cả chuỗi dài: userid|mk|email|mk|token...)")
 
         self.btn_prev_acc = QPushButton("◀")
         self.btn_prev_acc.setToolTip("Quay lại tài khoản trước trong danh sách")
@@ -3177,7 +3182,25 @@ class MainWindow(QWidget):
             clean_acc = clean_account_string(acc)
             em, _, _ = extract_email_and_password(clean_acc)
             is_ok = bool(em and em.lower() in completed_emails)
-            display_text = f"✅ [OK] {clean_acc}" if is_ok else f"⏳ {clean_acc}"
+            status_tag = "✅ [OK]" if is_ok else "⏳"
+            
+            # Tự động nhận diện username (nếu có phía trước email, ví dụ userid|mk_tt|email...)
+            parts = [p.strip() for p in clean_acc.split('|') if p.strip()]
+            user_prefix = ""
+            if em and parts:
+                em_idx = -1
+                for i, p in enumerate(parts):
+                    if p.lower() == em.lower():
+                        em_idx = i
+                        break
+                if em_idx > 0:
+                    user_prefix = f"[{parts[0]}] "
+
+            if em:
+                display_text = f"{status_tag} {user_prefix}{em}"
+            else:
+                display_text = f"{status_tag} {clean_acc[:60]}..."
+
             self.acc_combo.addItem(display_text, userData=clean_acc)
             
             if target:
@@ -3208,7 +3231,9 @@ class MainWindow(QWidget):
             raw = self.acc_combo.itemData(cur_idx - 1)
             if raw:
                 self.acc_input.setText(raw)
-            self.log_output.append(f"◀ [Tài khoản] Đã quay lại tài khoản trước ({cur_idx}/{self.acc_combo.count()}): {raw}")
+            em, _, _ = extract_email_and_password(raw or "")
+            show_name = em or (raw[:40] if raw else "")
+            self.log_output.append(f"◀ [Tài khoản] Đã quay lại tài khoản trước ({cur_idx}/{self.acc_combo.count()}): {show_name}")
         else:
             self.log_output.append("ℹ️ Đang ở tài khoản đầu tiên trong danh sách.")
 
@@ -3220,7 +3245,9 @@ class MainWindow(QWidget):
             raw = self.acc_combo.itemData(cur_idx + 1)
             if raw:
                 self.acc_input.setText(raw)
-            self.log_output.append(f"▶ [Tài khoản] Đã chuyển tới tài khoản tiếp theo ({cur_idx + 2}/{count}): {raw}")
+            em, _, _ = extract_email_and_password(raw or "")
+            show_name = em or (raw[:40] if raw else "")
+            self.log_output.append(f"▶ [Tài khoản] Đã chuyển tới tài khoản tiếp theo ({cur_idx + 2}/{count}): {show_name}")
         else:
             self.log_output.append("ℹ️ Đang ở tài khoản cuối cùng trong danh sách.")
 
@@ -3235,7 +3262,9 @@ class MainWindow(QWidget):
             raw = self.acc_combo.itemData(next_idx)
             if raw:
                 self.acc_input.setText(raw)
-            self.log_output.append(f"🔁 [Tài khoản tiếp theo] Đã tự động chuyển sang tài khoản ({next_idx + 1}/{count}): {raw}")
+            em, _, _ = extract_email_and_password(raw or "")
+            show_name = em or (raw[:40] if raw else "")
+            self.log_output.append(f"🔁 [Tài khoản tiếp theo] Đã tự động chuyển sang tài khoản ({next_idx + 1}/{count}): {show_name}")
         else:
             self.log_output.append(f"🏁 [Tài khoản] Đã hoàn thành duyệt hết {count} tài khoản trong danh sách!")
 
