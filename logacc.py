@@ -240,6 +240,15 @@ def check_auto_update(silent=False, parent_widget=None):
    
 
 # --- HÀM TỰ ĐỘNG NHẬN DIỆN EMAIL VÀ MẬT KHẨU EMAIL TRONG CHUỖI ĐẦU VÀO ---
+def clean_account_string(raw_str):
+    """
+    Loại bỏ các tiền tố trạng thái hiển thị như ✅ [OK], [OK], ⏳, ✅ ở đầu chuỗi tài khoản.
+    """
+    if not raw_str:
+        return ""
+    cleaned = re.sub(r'^[✅⏳\s]*(\[OK\])?\s*', '', str(raw_str)).strip()
+    return cleaned
+
 def extract_email_and_password(raw_str):
     """
     Tự động nhận diện tài khoản email và mật khẩu email từ chuỗi phân tách bằng dấu '|'.
@@ -250,6 +259,7 @@ def extract_email_and_password(raw_str):
     if not raw_str:
         return None, None, -1
         
+    raw_str = clean_account_string(raw_str)
     parts = [p.strip() for p in raw_str.split('|') if p.strip()]
     if not parts:
         return None, None, -1
@@ -603,6 +613,8 @@ def get_app_dir():
 
 APP_DIR = get_app_dir()
 RECOVERY_EMAILS_FILE = os.path.join(APP_DIR, "recovery_emails.txt")
+TARGET_ACCOUNTS_FILE = os.path.join(APP_DIR, "target_accounts.txt")
+RESULTS_FILE = os.path.join(APP_DIR, "results.txt")
 NICKNAMES_FILE = os.path.join(APP_DIR, "nicknames.txt")
 AVATARS_DIR = os.path.join(APP_DIR, "avatars")
 GUI_CONFIG_FILE = os.path.join(APP_DIR, "gui_config.json")
@@ -712,6 +724,100 @@ def save_recovery_emails(email_list):
                         f.write(item.strip() + "\n")
         except Exception as e:
             safe_print(f"Lỗi lưu recovery emails tới {target}: {e}")
+
+def load_target_accounts():
+    candidate_paths = [
+        TARGET_ACCOUNTS_FILE,
+        os.path.join(APP_DIR, "target_accounts.txt"),
+        os.path.join(APP_DIR, "dist", "target_accounts.txt"),
+        os.path.join(os.path.dirname(APP_DIR), "target_accounts.txt"),
+        r"E:\Outh2 hotmail\target_accounts.txt",
+        r"E:\Outh2 hotmail\dist\target_accounts.txt",
+    ]
+    for p in candidate_paths:
+        if p and os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+                    if lines:
+                        return lines
+            except Exception:
+                pass
+    return []
+
+def save_target_accounts(acc_list):
+    target_files = set()
+    candidate_paths = [
+        TARGET_ACCOUNTS_FILE,
+        os.path.join(APP_DIR, "target_accounts.txt"),
+        os.path.join(APP_DIR, "dist", "target_accounts.txt"),
+        os.path.join(os.path.dirname(APP_DIR), "target_accounts.txt"),
+        r"E:\Outh2 hotmail\target_accounts.txt",
+        r"E:\Outh2 hotmail\dist\target_accounts.txt",
+    ]
+    for p in candidate_paths:
+        if p and os.path.exists(os.path.dirname(p)):
+            target_files.add(os.path.abspath(p))
+
+    for target in target_files:
+        try:
+            with open(target, "w", encoding="utf-8") as f:
+                for item in acc_list:
+                    if item.strip():
+                        f.write(item.strip() + "\n")
+        except Exception as e:
+            safe_print(f"Lỗi lưu target accounts tới {target}: {e}")
+
+def save_account_result(result_str):
+    if not result_str or not str(result_str).strip():
+        return
+    res_clean = str(result_str).strip()
+    candidate_paths = [
+        RESULTS_FILE,
+        os.path.join(APP_DIR, "results.txt"),
+        os.path.join(APP_DIR, "dist", "results.txt"),
+        os.path.join(os.path.dirname(APP_DIR), "results.txt"),
+        r"E:\Outh2 hotmail\results.txt",
+        r"E:\Outh2 hotmail\dist\results.txt",
+    ]
+    target_files = set()
+    for p in candidate_paths:
+        if p and os.path.exists(os.path.dirname(p)):
+            target_files.add(os.path.abspath(p))
+
+    for target in target_files:
+        try:
+            existing = set()
+            if os.path.isfile(target):
+                with open(target, "r", encoding="utf-8") as f:
+                    existing = {line.strip() for line in f if line.strip()}
+            if res_clean not in existing:
+                with open(target, "a", encoding="utf-8") as f:
+                    f.write(res_clean + "\n")
+        except Exception as e:
+            safe_print(f"Lỗi lưu kết quả tới {target}: {e}")
+
+def load_successful_account_emails():
+    completed_emails = set()
+    candidate_paths = [
+        RESULTS_FILE,
+        os.path.join(APP_DIR, "results.txt"),
+        os.path.join(APP_DIR, "dist", "results.txt"),
+        os.path.join(os.path.dirname(APP_DIR), "results.txt"),
+        r"E:\Outh2 hotmail\results.txt",
+        r"E:\Outh2 hotmail\dist\results.txt",
+    ]
+    for p in candidate_paths:
+        if p and os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        em, _, _ = extract_email_and_password(line.strip())
+                        if em:
+                            completed_emails.add(em.strip().lower())
+            except Exception:
+                pass
+    return completed_emails
 
 def rotate_and_save_recovery_email(failed_recovery=None, log_signal=None, recovery_changed_signal=None):
     """
@@ -1868,6 +1974,54 @@ def get_random_nickname():
     return random.choice(nicks) if nicks else None
 
 
+class TargetAccountsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quản Lý Danh Sách Tài Khoản Cần Lấy")
+        self.resize(720, 500)
+        self.setStyleSheet("""
+            QDialog { background-color: #121212; color: #ffffff; }
+            QLabel { color: #e0e0e0; font-size: 13px; }
+            QTextEdit { background-color: #1e1e1e; color: #81c784; border: 1px solid #333; border-radius: 4px; font-family: Consolas, monospace; font-size: 12px; }
+            QPushButton { border-radius: 4px; padding: 8px 16px; font-weight: bold; }
+        """)
+
+        layout = QVBoxLayout(self)
+        
+        lbl_info = QLabel("<b>Nhập danh sách tài khoản Hotmail cần lấy (mỗi dòng: tk|mk):</b><br>"
+                          "<span style='color: #aaa;'>Ví dụ: email1@hotmail.com|password123<br>"
+                          "Tool sẽ nạp danh sách lên giao diện, tự động đánh dấu <b>✅ [OK]</b> khi hoàn thành, "
+                          "và tự động chuyển sang tài khoản tiếp theo khi bấm STOP. Bạn vẫn có thể bấm chọn lại tài khoản bất kỳ lúc nào để check lại.</span>")
+        lbl_info.setWordWrap(True)
+        layout.addWidget(lbl_info)
+
+        self.text_edit = QTextEdit()
+        accounts = load_target_accounts()
+        self.text_edit.setPlainText("\n".join(accounts))
+        layout.addWidget(self.text_edit)
+
+        btn_layout = QHBoxLayout()
+        self.btn_save = QPushButton("💾 Lưu Danh Sách")
+        self.btn_save.setStyleSheet("background-color: #1565c0; color: white;")
+        self.btn_save.clicked.connect(self.save_and_close)
+
+        self.btn_cancel = QPushButton("Đóng")
+        self.btn_cancel.setStyleSheet("background-color: #424242; color: white;")
+        self.btn_cancel.clicked.connect(self.reject)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_save)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def save_and_close(self):
+        content = self.text_edit.toPlainText().strip()
+        lines = [clean_account_string(line.strip()) for line in content.splitlines() if line.strip() and not line.strip().startswith("#")]
+        save_target_accounts(lines)
+        QMessageBox.information(self, "Thông báo", f"Đã lưu thành công {len(lines)} tài khoản cần lấy!")
+        self.accept()
+
+
 class RecoveryEmailsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2770,12 +2924,38 @@ class MainWindow(QWidget):
 
         main_layout = QVBoxLayout()
 
-        # Ô 1: Nhập tài khoản Hotmail cần lấy (tk|mk)
+        # Ô 1: Nhập hoặc chọn tài khoản Hotmail cần lấy (tk|mk)
         acc_layout = QHBoxLayout()
-        self.acc_input = QLineEdit()
-        self.acc_input.setPlaceholderText("Nhập tk|mk Hotmail cần lấy OAuth2...")
+        self.acc_combo = QComboBox()
+        self.acc_combo.setEditable(True)
+        self.acc_combo.setStyleSheet("""
+            QComboBox { background-color: #1e1e1e; border: 1px solid #333; padding: 6px; border-radius: 4px; color: #ffffff; font-size: 12px; }
+            QComboBox QAbstractItemView { background-color: #1e1e1e; color: #ffffff; selection-background-color: #1976d2; }
+        """)
+        self.acc_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.acc_input = self.acc_combo.lineEdit()
+        self.acc_input.setPlaceholderText("Nhập hoặc chọn tk|mk Hotmail cần lấy OAuth2...")
+
+        self.btn_prev_acc = QPushButton("◀")
+        self.btn_prev_acc.setToolTip("Quay lại tài khoản trước trong danh sách")
+        self.btn_prev_acc.setStyleSheet("padding: 8px 10px; background-color: #37474f; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_prev_acc.clicked.connect(self.select_prev_account)
+
+        self.btn_next_acc = QPushButton("▶")
+        self.btn_next_acc.setToolTip("Chuyển sang tài khoản tiếp theo trong danh sách")
+        self.btn_next_acc.setStyleSheet("padding: 8px 10px; background-color: #37474f; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_next_acc.clicked.connect(self.select_next_account)
+
+        self.btn_manage_accounts = QPushButton("📋 Danh Sách TK")
+        self.btn_manage_accounts.setStyleSheet("padding: 8px 12px; background-color: #1565c0; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_manage_accounts.setToolTip("Nhập danh sách tài khoản Hotmail cần lấy (mỗi dòng 1 tài khoản)")
+        self.btn_manage_accounts.clicked.connect(self.open_target_accounts_dialog)
+
         acc_layout.addWidget(QLabel("<b>Tài khoản cần lấy:</b>"))
-        acc_layout.addWidget(self.acc_input)
+        acc_layout.addWidget(self.btn_prev_acc)
+        acc_layout.addWidget(self.acc_combo, stretch=1)
+        acc_layout.addWidget(self.btn_next_acc)
+        acc_layout.addWidget(self.btn_manage_accounts)
         main_layout.addLayout(acc_layout)
 
         # Ô 2: Nhập / Chọn email khôi phục từ List
@@ -2969,6 +3149,7 @@ class MainWindow(QWidget):
         self.load_settings_to_gui()
 
         # Tự động lưu cấu hình mỗi khi người dùng thay đổi giá trị trên giao diện
+        self.acc_combo.currentIndexChanged.connect(self.on_acc_combo_index_changed)
         self.acc_input.textChanged.connect(self.save_settings_from_gui)
         self.recovery_combo.currentTextChanged.connect(self.save_settings_from_gui)
         self.gpm_profile_input.textChanged.connect(self.save_settings_from_gui)
@@ -2976,11 +3157,100 @@ class MainWindow(QWidget):
         self.cb_change_nickname.toggled.connect(self.save_settings_from_gui)
         self.cb_change_avatar.toggled.connect(self.save_settings_from_gui)
 
+    def on_acc_combo_index_changed(self, index):
+        if index >= 0:
+            raw = self.acc_combo.itemData(index)
+            if raw:
+                QTimer.singleShot(0, lambda: self.acc_input.setText(raw))
+                self.save_settings_from_gui()
+
+    def refresh_acc_combo(self, select_account=None):
+        target = clean_account_string(select_account) if select_account else clean_account_string(self.acc_combo.currentText())
+        self.acc_combo.blockSignals(True)
+        self.acc_combo.clear()
+        
+        accounts = load_target_accounts()
+        completed_emails = load_successful_account_emails()
+        
+        selected_index = -1
+        for idx, acc in enumerate(accounts):
+            clean_acc = clean_account_string(acc)
+            em, _, _ = extract_email_and_password(clean_acc)
+            is_ok = bool(em and em.lower() in completed_emails)
+            display_text = f"✅ [OK] {clean_acc}" if is_ok else f"⏳ {clean_acc}"
+            self.acc_combo.addItem(display_text, userData=clean_acc)
+            
+            if target:
+                target_clean = clean_account_string(target).lower()
+                acc_clean = clean_acc.lower()
+                if target_clean == acc_clean or (em and em.lower() in target_clean):
+                    selected_index = idx
+
+        self.acc_combo.blockSignals(False)
+        
+        if selected_index >= 0:
+            self.acc_combo.setCurrentIndex(selected_index)
+            raw_val = self.acc_combo.itemData(selected_index)
+            if raw_val:
+                self.acc_input.setText(raw_val)
+        elif target:
+            self.acc_combo.setEditText(target)
+        elif accounts:
+            self.acc_combo.setCurrentIndex(0)
+            raw_val = self.acc_combo.itemData(0)
+            if raw_val:
+                self.acc_input.setText(raw_val)
+
+    def select_prev_account(self):
+        cur_idx = self.acc_combo.currentIndex()
+        if cur_idx > 0:
+            self.acc_combo.setCurrentIndex(cur_idx - 1)
+            raw = self.acc_combo.itemData(cur_idx - 1)
+            if raw:
+                self.acc_input.setText(raw)
+            self.log_output.append(f"◀ [Tài khoản] Đã quay lại tài khoản trước ({cur_idx}/{self.acc_combo.count()}): {raw}")
+        else:
+            self.log_output.append("ℹ️ Đang ở tài khoản đầu tiên trong danh sách.")
+
+    def select_next_account(self):
+        cur_idx = self.acc_combo.currentIndex()
+        count = self.acc_combo.count()
+        if cur_idx + 1 < count:
+            self.acc_combo.setCurrentIndex(cur_idx + 1)
+            raw = self.acc_combo.itemData(cur_idx + 1)
+            if raw:
+                self.acc_input.setText(raw)
+            self.log_output.append(f"▶ [Tài khoản] Đã chuyển tới tài khoản tiếp theo ({cur_idx + 2}/{count}): {raw}")
+        else:
+            self.log_output.append("ℹ️ Đang ở tài khoản cuối cùng trong danh sách.")
+
+    def advance_target_account(self):
+        cur_idx = self.acc_combo.currentIndex()
+        count = self.acc_combo.count()
+        if count == 0:
+            return
+        next_idx = cur_idx + 1
+        if next_idx < count:
+            self.acc_combo.setCurrentIndex(next_idx)
+            raw = self.acc_combo.itemData(next_idx)
+            if raw:
+                self.acc_input.setText(raw)
+            self.log_output.append(f"🔁 [Tài khoản tiếp theo] Đã tự động chuyển sang tài khoản ({next_idx + 1}/{count}): {raw}")
+        else:
+            self.log_output.append(f"🏁 [Tài khoản] Đã hoàn thành duyệt hết {count} tài khoản trong danh sách!")
+
+    def open_target_accounts_dialog(self):
+        dlg = TargetAccountsDialog(self)
+        if dlg.exec():
+            self.refresh_acc_combo()
+            self.log_output.append(f"📋 Đã cập nhật danh sách tài khoản ({len(load_target_accounts())} tài khoản).")
+
     def load_settings_to_gui(self):
         cfg = load_gui_config()
+        saved_acc = cfg.get("acc_input") if cfg else None
+        self.refresh_acc_combo(select_account=saved_acc)
+        self.refresh_recovery_combo()
         if cfg:
-            if "acc_input" in cfg and cfg["acc_input"]:
-                self.acc_input.setText(cfg["acc_input"])
             if "gpm_profile" in cfg and cfg["gpm_profile"]:
                 saved_p = str(cfg["gpm_profile"]).strip()
                 if saved_p and saved_p != "US-45-1":
@@ -3016,7 +3286,7 @@ class MainWindow(QWidget):
     def save_settings_from_gui(self, *args):
         try:
             cfg = {
-                "acc_input": self.acc_input.text().strip(),
+                "acc_input": clean_account_string(self.acc_input.text().strip()),
                 "recovery_email": self.recovery_combo.currentText().strip(),
                 "gpm_profile": self.gpm_profile_input.text().strip(),
                 "gpm_api": self.gpm_api_input.text().strip(),
@@ -4496,11 +4766,11 @@ class MainWindow(QWidget):
 
 
     def start_process(self):
-        target_acc = self.acc_input.text().strip()
+        target_acc = clean_account_string(self.acc_input.text().strip())
         recovery_list = self.get_recovery_list()
 
         if not target_acc:
-            self.log_output.append("⚠️ Vui lòng nhập tài khoản cần lấy OAuth2!")
+            self.log_output.append("⚠️ Vui lòng nhập hoặc chọn tài khoản cần lấy OAuth2!")
             return
 
         email, password, _ = extract_email_and_password(target_acc)
@@ -4566,7 +4836,8 @@ class MainWindow(QWidget):
             self.otp_auto_timer.stop()
             self.log_output.append("⏹️ [Tự động] Đã hủy đếm giờ tự động chạy VPN+GPM do đã bấm STOP.")
 
-        self.acc_input.clear()
+        # Tự động chuyển sang tài khoản tiếp theo trong danh sách và profile GPM tiếp theo khi bấm STOP
+        self.advance_target_account()
         self.advance_gpm_profile()
 
     def copy_result(self):
@@ -4673,6 +4944,16 @@ class MainWindow(QWidget):
 
     def show_result(self, result_str):
         self.result_output.setText(result_str)
+        save_account_result(result_str)
+        self.log_output.append("💾 Đã lưu kết quả mới vào file results.txt")
+        current_acc = clean_account_string(self.acc_input.text().strip())
+        if current_acc:
+            accs = load_target_accounts()
+            clean_accs = [clean_account_string(a) for a in accs]
+            if current_acc not in clean_accs:
+                accs.append(current_acc)
+                save_target_accounts(accs)
+        self.refresh_acc_combo(select_account=current_acc)
 
     def manual_check_update(self):
         self.btn_update.setEnabled(False)
