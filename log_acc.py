@@ -823,6 +823,66 @@ def load_successful_account_emails():
                 pass
     return completed_emails
 
+def find_result_by_email(email):
+    """Tìm chuỗi kết quả đầy đủ đã lưu trong results.txt theo địa chỉ email."""
+    if not email:
+        return None
+    em_clean = email.strip().lower()
+    candidate_paths = [
+        RESULTS_FILE,
+        os.path.join(APP_DIR, "results.txt"),
+        os.path.join(APP_DIR, "dist", "results.txt"),
+        os.path.join(os.path.dirname(APP_DIR), "results.txt"),
+        r"E:\Outh2 hotmail\results.txt",
+        r"E:\Outh2 hotmail\dist\results.txt",
+    ]
+    for p in candidate_paths:
+        if p and os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        e, _, _ = extract_email_and_password(line_str)
+                        if e and e.strip().lower() == em_clean:
+                            return line_str
+            except Exception:
+                pass
+    return None
+
+def parse_oauth2_and_client_id(str_val):
+    """Bóc tách chính xác OAuth2 token và ClientID từ bất kỳ chuỗi kết quả nào."""
+    if not str_val:
+        return None, None
+    clean_val = clean_account_string(str_val)
+    parts = [p.strip() for p in clean_val.split('|') if p.strip()]
+    if not parts:
+        return None, None
+        
+    client_id = CLIENT_ID
+    uuid_regex = re.compile(r'^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$')
+    for p in parts:
+        if uuid_regex.match(p):
+            client_id = p
+            break
+            
+    oauth2_token = None
+    for p in parts:
+        if len(p) > 50 and not uuid_regex.match(p) and not ('/' in p and ':' in p):
+            oauth2_token = p
+            break
+            
+    if not oauth2_token:
+        if len(parts) >= 3 and ('/' in parts[-1] and ':' in parts[-1]):
+            oauth2_token = parts[-3]
+            client_id = parts[-2]
+        elif len(parts) >= 2:
+            oauth2_token = parts[-2]
+            client_id = parts[-1]
+            
+    return oauth2_token, client_id
+
 def rotate_and_save_recovery_email(failed_recovery=None, log_signal=None, recovery_changed_signal=None):
     """
     Khi gặp lỗi (ví dụ 'Something went wrong' khi gửi OTP tới email khôi phục),
@@ -3292,6 +3352,16 @@ class MainWindow(QWidget):
             if raw:
                 QTimer.singleShot(0, lambda: self.acc_input.setText(raw))
                 self.save_settings_from_gui()
+                
+                # Tự động nạp kết quả đã lưu vào ô kết quả nếu tài khoản này đã có kết quả trong results.txt
+                em, _, _ = extract_email_and_password(raw)
+                if em:
+                    saved_res = find_result_by_email(em)
+                    if saved_res:
+                        self.result_output.setText(saved_res)
+                        self.log_output.append(f"🔍 [Lịch sử] Đã tự động nạp kết quả OAuth2 của {em} vào ô kết quả.")
+                    else:
+                        self.result_output.clear()
 
     def refresh_acc_combo(self, select_account=None):
         target = clean_account_string(select_account) if select_account else clean_account_string(self.acc_combo.currentText())
@@ -3357,6 +3427,12 @@ class MainWindow(QWidget):
                 self.acc_input.setText(raw)
             em, _, _ = extract_email_and_password(raw or "")
             show_name = em or (raw[:40] if raw else "")
+            if em:
+                saved_res = find_result_by_email(em)
+                if saved_res:
+                    self.result_output.setText(saved_res)
+                else:
+                    self.result_output.clear()
             self.log_output.append(f"◀ [Tài khoản] Đã quay lại tài khoản trước ({cur_idx}/{self.acc_combo.count()}): {show_name}")
         else:
             self.log_output.append("ℹ️ Đang ở tài khoản đầu tiên trong danh sách.")
@@ -3371,6 +3447,12 @@ class MainWindow(QWidget):
                 self.acc_input.setText(raw)
             em, _, _ = extract_email_and_password(raw or "")
             show_name = em or (raw[:40] if raw else "")
+            if em:
+                saved_res = find_result_by_email(em)
+                if saved_res:
+                    self.result_output.setText(saved_res)
+                else:
+                    self.result_output.clear()
             self.log_output.append(f"▶ [Tài khoản] Đã chuyển tới tài khoản tiếp theo ({cur_idx + 2}/{count}): {show_name}")
         else:
             self.log_output.append("ℹ️ Đang ở tài khoản cuối cùng trong danh sách.")
@@ -3388,6 +3470,12 @@ class MainWindow(QWidget):
                 self.acc_input.setText(raw)
             em, _, _ = extract_email_and_password(raw or "")
             show_name = em or (raw[:40] if raw else "")
+            if em:
+                saved_res = find_result_by_email(em)
+                if saved_res:
+                    self.result_output.setText(saved_res)
+                else:
+                    self.result_output.clear()
             self.log_output.append(f"🔁 [Tài khoản tiếp theo] Đã tự động chuyển sang tài khoản ({next_idx + 1}/{count}): {show_name}")
         else:
             self.log_output.append(f"🏁 [Tài khoản] Đã hoàn thành duyệt hết {count} tài khoản trong danh sách!")
@@ -5050,32 +5138,30 @@ class MainWindow(QWidget):
 
     def fetch_and_copy_otp(self):
         """Quét và lấy mã OTP qua API ngầm trong luồng riêng, không làm đơ/lag giao diện (GUI)"""
-        # Lấy chuỗi từ ô kết quả (nếu chưa có thì thử lấy ở ô tài khoản nhập vào)
+        # 1. Thử lấy từ ô kết quả trước
         result_acc = self.result_output.text().strip()
-        if not result_acc or '|' not in result_acc:
-            result_acc = self.acc_input.text().strip()
         
-        if not result_acc or '|' not in result_acc:
-            self.log_output.append("⚠️ Chưa có kết quả tài khoản hoặc chuỗi không hợp lệ để lấy OTP (cần có OAuth2|ClientID)!")
+        # 2. Nếu ô kết quả trống, tự động tìm kiếm kết quả của tài khoản đang chọn từ results.txt
+        target_acc = clean_account_string(self.acc_input.text().strip())
+        em_target, _, _ = extract_email_and_password(target_acc)
+        
+        if not result_acc and em_target:
+            saved_res = find_result_by_email(em_target)
+            if saved_res:
+                result_acc = saved_res
+                self.result_output.setText(saved_res)
+                self.log_output.append(f"🔍 [Lịch sử] Đã tự động nạp kết quả OAuth2 của {em_target} để lấy OTP!")
+
+        # 3. Dự phòng nếu vẫn chưa có thì thử lấy chính chuỗi đang có trong ô tài khoản
+        if not result_acc:
+            result_acc = target_acc
+        
+        outh2, client_id = parse_oauth2_and_client_id(result_acc)
+        if not outh2:
+            self.log_output.append("⚠️ Chưa có thông tin OAuth2 hợp lệ để lấy OTP! Vui lòng chọn tài khoản đã hoàn thành hoặc có mã OAuth2.")
             return
-        
-        # Tách chuỗi kết quả: dạng userid|tk|mk|outh2|clientid hoặc tk|mk|outh2|clientid hoặc outh2|clientid
-        parts = result_acc.split('|')
-        
-        # Kiểm tra xem chuỗi có đủ thông tin oauth2 và clientid không
-        if len(parts) >= 4:
-            # Lấy 2 phần cuối cùng làm oAuth2 và Client ID
-            outh2 = parts[-2].strip()
-            client_id = parts[-1].strip()
-            target_recovery_str = f"dummy|dummy|{outh2}|{client_id}"
-        elif len(parts) == 2:
-            outh2 = parts[0].strip()
-            client_id = parts[1].strip()
-            target_recovery_str = f"dummy|dummy|{outh2}|{client_id}"
-        else:
-            self.log_output.append("❌ Chuỗi chưa đủ định dạng OAuth2 và Client ID để lấy OTP (cần tk|mk|oauth2|client_id)!")
-            return
-        
+
+        target_recovery_str = f"dummy|dummy|{outh2}|{client_id}"
         self.log_output.append("🚀 Đang khởi chạy luồng quét OTP ngầm (giao diện không bị lag)...")
         
         def run_otp_worker():
