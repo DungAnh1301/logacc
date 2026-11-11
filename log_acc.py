@@ -622,6 +622,7 @@ RESULTS_FILE = os.path.join(APP_DIR, "results.txt")
 NICKNAMES_FILE = os.path.join(APP_DIR, "nicknames.txt")
 AVATARS_DIR = os.path.join(APP_DIR, "avatars")
 GUI_CONFIG_FILE = os.path.join(APP_DIR, "gui_config.json")
+DEFAULT_CLIENT_ID = "b849bc72-dc2c-492f-b087-71e84e926496"
 
 os.makedirs(AVATARS_DIR, exist_ok=True)
 
@@ -860,7 +861,7 @@ def parse_oauth2_and_client_id(str_val):
     if not parts:
         return None, None
         
-    client_id = CLIENT_ID
+    client_id = DEFAULT_CLIENT_ID
     uuid_regex = re.compile(r'^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$')
     for p in parts:
         if uuid_regex.match(p):
