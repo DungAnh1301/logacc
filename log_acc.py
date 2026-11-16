@@ -1315,7 +1315,225 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         log_signal.emit(f"⚠️ Thử bấm Cancel Passkey: {e}")
 
                 # ==========================================================
-                # XỬ LÝ MÀN HÌNH "Almost there" / "Send a code to du*****@..."
+                # TRƯỜNG HỢP 1 - NHÁNH 2: Màn hình "Help us protect your account" / identity/confirm (dropdown iProofOptions & input iProofEmail)
+                # ==========================================================
+                is_identity_confirm_screen = (
+                    "identity/confirm" in page.url.lower()
+                    or await page.locator("#iSelectProof, #iProofOptions, input#iProofEmail").count() > 0
+                    or await page.locator("#iVerifyCode, input#iOttText").count() > 0
+                )
+                if is_identity_confirm_screen:
+                    log_signal.emit("🛡️ [Trường hợp 1 - Nhánh 2] Phát hiện màn hình xác thực 'Help us protect your account' (identity/confirm)...")
+                    if not recovery_list:
+                        log_signal.emit("⚠️ Không có email khôi phục nào trong danh sách!")
+                        break
+
+                    # 1. Trích xuất 2 ký tự đầu từ text hiển thị hoặc option trong #iProofOptions
+                    proof_text = ""
+                    try:
+                        if await page.locator("#iProofOptions").count() > 0:
+                            proof_text = await page.locator("#iProofOptions").inner_text()
+                    except Exception:
+                        pass
+                    if not proof_text:
+                        try:
+                            proof_text = await page.locator("#iSelectProof, #pageControlHost, #maincontent").first.inner_text()
+                        except Exception:
+                            pass
+                    if not proof_text:
+                        proof_text = content
+
+                    m = re.search(r'([a-zA-Z0-9._%+-]+?)\*+@([a-zA-Z0-9.-]+)', proof_text)
+                    matched_recoveries = []
+                    if m:
+                        masked_prefix = m.group(1).lower().strip()
+                        masked_domain = m.group(2).lower().strip()
+                        prefix_2 = masked_prefix[:2]
+                        log_signal.emit(f"🔍 [Nhánh 2] Nhận diện email nhận mã: {masked_prefix}*****@{masked_domain} -> Lọc theo 2 chữ cái đầu: '{prefix_2}'")
+
+                        for r in recovery_list:
+                            r_email = r.split('|')[0].strip().lower() if '|' in r else r.strip().lower()
+                            if r_email.startswith(prefix_2):
+                                matched_recoveries.append(r)
+
+                        log_signal.emit(f"📋 Tìm thấy {len(matched_recoveries)}/{len(recovery_list)} email khôi phục bắt đầu bằng '{prefix_2}'")
+
+                    if not matched_recoveries:
+                        matched_recoveries = recovery_list[:]
+
+                    recovery_verified = False
+                    for rec_idx, cur_recovery in enumerate(matched_recoveries):
+                        cur_email = cur_recovery.split('|')[0].strip() if '|' in cur_recovery else cur_recovery.strip()
+                        log_signal.emit(f"📧 [Nhánh 2 - Email {rec_idx+1}/{len(matched_recoveries)}] Thử xác thực với email: {cur_email}")
+
+                        # 1. Nếu đang ở màn hình nhập code (Page 2), bấm "Use a different verification option" để về Page 1
+                        is_on_code_page = (
+                            await page.is_visible("input#iOttText, input[name='iOttText'], #iVerifyCode")
+                            or "enter your security code" in (await safe_page_content(page)).lower()
+                        )
+                        if is_on_code_page:
+                            log_signal.emit("🔙 Đang ở trang nhập code, bấm 'Use a different verification option' để quay lại...")
+                            await page.evaluate("""() => {
+                                const links = Array.from(document.querySelectorAll('a, button, span, [role="button"]'));
+                                for (const l of links) {
+                                    const t = (l.textContent || '').trim().toLowerCase();
+                                    if (t.includes('use a different verification option') || t.includes('different verification option')) {
+                                        l.scrollIntoView();
+                                        l.click();
+                                        return true;
+                                    }
+                                }
+                                const alt = document.getElementById('iVerifyCodeAlternate') || document.getElementById('bannerBackButton');
+                                if (alt) { alt.click(); return true; }
+                                return false;
+                            }""")
+                            try:
+                                diff_loc = page.locator("a:has-text('Use a different verification option'), a:has-text('different verification'), #iVerifyCodeAlternate, #bannerBackButton").first
+                                if await diff_loc.is_visible():
+                                    await diff_loc.click(force=True, timeout=3000)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2)
+
+                        # 2. Đảm bảo đang ở màn hình nhập email khôi phục (#iProofEmail)
+                        try:
+                            await page.wait_for_selector("input#iProofEmail, input[name='iProofEmail']", state="visible", timeout=10000)
+                        except Exception:
+                            log_signal.emit("⚠️ Không tìm thấy ô nhập email khôi phục (input#iProofEmail), thử tiếp...")
+                            continue
+
+                        # Đảm bảo dropdown chọn option Email
+                        try:
+                            sel = page.locator("#iProofOptions")
+                            if await sel.count() > 0 and await sel.is_visible():
+                                await page.evaluate("""() => {
+                                    const s = document.getElementById('iProofOptions');
+                                    if (!s) return;
+                                    for (let opt of s.options) {
+                                        if (opt.value.includes('OTT||') || opt.text.toLowerCase().includes('email')) {
+                                            s.value = opt.value;
+                                            s.dispatchEvent(new Event('change', { bubbles: true }));
+                                            break;
+                                        }
+                                    }
+                                }""")
+                        except Exception:
+                            pass
+
+                        # 3. Điền cur_email vào input#iProofEmail
+                        email_inp = page.locator("input#iProofEmail, input[name='iProofEmail']").first
+                        await email_inp.click()
+                        await email_inp.fill("")
+                        await email_inp.fill(cur_email)
+                        await asyncio.sleep(0.5)
+
+                        # 4. Bấm nút Next (#iSelectProofAction)
+                        btn_next = page.locator("#iSelectProofAction, input[type='submit'][value='Next'], button[type='submit'], input[value='Next']").first
+                        await btn_next.click(timeout=10000)
+                        await asyncio.sleep(2)
+
+                        # 5. Kiểm tra lỗi Something went wrong hoặc lỗi email không khớp
+                        check_content = (await safe_page_content(page)).lower()
+                        if (
+                            "something went wrong" in check_content
+                            or "we can't complete your request right now" in check_content
+                            or "try again later" in check_content
+                            or "there's a temporary problem" in check_content
+                        ):
+                            log_signal.emit(f"🛑 [Microsoft] Dính lỗi 'Something went wrong' khi gửi mã cho email {cur_email}.")
+                            raise MicrosoftSessionResetException("Dính lỗi Something went wrong tại Nhánh 2", failed_recovery=cur_recovery)
+
+                        input_err = ""
+                        try:
+                            err_div = page.locator("#iProofInputError, #iSelectProofError, .alert-error").first
+                            if await err_div.is_visible():
+                                input_err = (await err_div.inner_text()).strip()
+                        except Exception:
+                            pass
+
+                        if input_err and ("doesn't match" in input_err.lower() or "not valid" in input_err.lower()):
+                            log_signal.emit(f"⚠️ Email '{cur_email}' không khớp với tài khoản ({input_err}). Thử email tiếp theo...")
+                            continue
+
+                        # 6. Chờ màn hình nhập code xuất hiện (#iOttText)
+                        code_input_appeared = False
+                        for _ in range(12):
+                            await pause_event.wait()
+                            if (
+                                await page.is_visible("input#iOttText, input[name='iOttText'], #iVerifyCode")
+                                or "enter your security code" in (await safe_page_content(page)).lower()
+                            ):
+                                code_input_appeared = True
+                                break
+                            await asyncio.sleep(1)
+
+                        if not code_input_appeared:
+                            log_signal.emit(f"⚠️ Chưa mở được trang nhập mã OTP cho email {cur_email}. Thử lại...")
+                            continue
+
+                        # 7. Quét OTP 5 lần trên cur_recovery
+                        log_signal.emit(f"⏳ Đang đợi OTP về hộp thư {cur_email} (kiểm tra 5 lần)...")
+                        otp_code = None
+                        for poll_attempt in range(5):
+                            await pause_event.wait()
+                            log_signal.emit(f"🔍 [Lần {poll_attempt+1}/5] Quét hộp thư {cur_email} tìm OTP...")
+                            otp_code = await asyncio.to_thread(get_single_outlook_otp, cur_recovery, 60)
+                            if otp_code:
+                                log_signal.emit(f"🎯 Bắt được mã OTP từ email '{cur_email}': {otp_code}")
+                                break
+                            await asyncio.sleep(3.5)
+
+                        # 8. Xử lý kết quả OTP
+                        if otp_code:
+                            otp_digits = str(otp_code).strip()
+                            log_signal.emit(f"🔑 Đang điền OTP {otp_digits} vào ô mã bảo mật...")
+                            ott_input = page.locator("input#iOttText, input[name='iOttText'], input[type='tel'], input[name='otc']").first
+                            await ott_input.fill("")
+                            await ott_input.fill(otp_digits)
+                            await asyncio.sleep(0.5)
+
+                            btn_verify = page.locator("#iVerifyCodeAction, input[type='submit'], button[type='submit'], #iNext, #idSIButton9").first
+                            if await btn_verify.is_visible():
+                                await btn_verify.click(timeout=10000)
+
+                            log_signal.emit(f"✅ Đã điền mã OTP thành công từ email {cur_email}!")
+                            await asyncio.sleep(4)
+                            recovery_verified = True
+                            break
+                        else:
+                            # Quá 5 lần không có OTP -> Bấm nút 'Use a different verification option'
+                            log_signal.emit(f"⚠️ Email {cur_email} không có OTP sau 5 lần kiểm tra. Đang bấm 'Use a different verification option' để thử email khác...")
+                            await page.evaluate("""() => {
+                                const links = Array.from(document.querySelectorAll('a, button, span, [role="button"]'));
+                                for (const l of links) {
+                                    const t = (l.textContent || '').trim().toLowerCase();
+                                    if (t.includes('use a different verification option') || t.includes('different verification option')) {
+                                        l.scrollIntoView();
+                                        l.click();
+                                        return true;
+                                    }
+                                }
+                                const alt = document.getElementById('iVerifyCodeAlternate') || document.getElementById('bannerBackButton');
+                                if (alt) { alt.click(); return true; }
+                                return false;
+                            }""")
+                            try:
+                                diff_loc = page.locator("a:has-text('Use a different verification option'), a:has-text('different verification'), #iVerifyCodeAlternate, #bannerBackButton").first
+                                if await diff_loc.is_visible():
+                                    await diff_loc.click(force=True, timeout=3000)
+                            except Exception:
+                                pass
+                            await asyncio.sleep(2.5)
+
+                    if recovery_verified:
+                        break
+                    else:
+                        failed_rec = matched_recoveries[0] if matched_recoveries else None
+                        log_signal.emit("❌ Đã thử tất cả các email khôi phục phù hợp nhưng không email nào có mã OTP.")
+                        raise MicrosoftSessionResetException("Đã thử hết email khôi phục mà không có OTP tại Nhánh 2", failed_recovery=failed_rec)
+
+                # ==========================================================
+                # TRƯỜNG HỢP 1 - NHÁNH 1: XỬ LÝ MÀN HÌNH "Almost there" / "Send a code to du*****@..."
                 # ==========================================================
                 is_almost_there_screen = (
                     "almost there" in content_lower
