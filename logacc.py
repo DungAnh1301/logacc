@@ -2104,7 +2104,11 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     result_signal.emit(final_result)
                     
                     log_signal.emit(f"🌐 Đang mở Outlook.com để load giao diện hộp thư...")
-                    await page.goto("https://outlook.live.com/mail/0/", timeout=60000)
+                    try:
+                        await page.goto("https://outlook.live.com/mail/0/", timeout=60000, wait_until="domcontentloaded")
+                    except Exception:
+                        # ERR_ABORTED thường do Outlook redirect SSO sang OWA, hoàn toàn bình thường
+                        pass
                     log_signal.emit(f"🛑 Đã vào Outlook thành công. Trình duyệt đứng im tại đây.")
                     
                     while True:
