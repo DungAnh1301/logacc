@@ -1307,6 +1307,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                 content = await safe_page_content(page)
                 if not content:
                     continue
+                content_lower = content.lower()
 
                 # Check nếu hiện màn hình lỗi "Something went wrong." của Microsoft
                 if await is_hit_something_went_wrong(page):
