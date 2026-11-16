@@ -1208,6 +1208,31 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     await asyncio.sleep(delay)
             return ""
 
+        async def is_hit_something_went_wrong(pg):
+            try:
+                # Nếu đang ở các trang hoặc phần tử xác thực hợp lệ thì KHÔNG phải lỗi
+                if (
+                    "identity/confirm" in pg.url.lower()
+                    or await pg.locator("#iSelectProof, #iProofOptions, input#iProofEmail, #iVerifyCode, input#iOttText, input[id^='codeEntry-'], [data-testid='tile'], [role='group'][aria-label*='Send a code']").count() > 0
+                ):
+                    return False
+                
+                title = (await pg.title()).lower()
+                if "something went wrong" in title:
+                    return True
+
+                vis_text = await pg.evaluate("""() => {
+                    return (document.body ? document.body.innerText : '').toLowerCase();
+                }""")
+                if (
+                    "something went wrong" in vis_text
+                    or "we can't complete your request right now" in vis_text
+                ):
+                    return True
+            except Exception:
+                pass
+            return False
+
         try:
             # ==========================================
             # BƯỚC 1: NHẬP TÀI KHOẢN & BẤM NEXT
@@ -1284,13 +1309,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     continue
 
                 # Check nếu hiện màn hình lỗi "Something went wrong." của Microsoft
-                content_lower = content.lower()
-                if (
-                    "something went wrong" in content_lower 
-                    or "we can't complete your request right now" in content_lower
-                    or "try again later" in content_lower
-                    or "there's a temporary problem" in content_lower
-                ):
+                if await is_hit_something_went_wrong(page):
                     failed_rec = recovery_list[0] if recovery_list else None
                     log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong.' Đang tắt Chrome để đổi email khôi phục và chạy lại...")
                     raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 3", failed_recovery=failed_rec)
@@ -1433,12 +1452,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         await asyncio.sleep(2)
 
                         # 5. Kiểm tra lỗi Something went wrong hoặc lỗi email không khớp
-                        check_content = (await safe_page_content(page)).lower()
+                        vis_err = await page.evaluate("() => (document.body ? document.body.innerText : '').toLowerCase()")
                         if (
-                            "something went wrong" in check_content
-                            or "we can't complete your request right now" in check_content
-                            or "try again later" in check_content
-                            or "there's a temporary problem" in check_content
+                            "something went wrong" in vis_err
+                            or "we can't complete your request right now" in vis_err
                         ):
                             log_signal.emit(f"🛑 [Microsoft] Dính lỗi 'Something went wrong' khi gửi mã cho email {cur_email}.")
                             raise MicrosoftSessionResetException("Dính lỗi Something went wrong tại Nhánh 2", failed_recovery=cur_recovery)
@@ -1679,12 +1696,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                             ):
                                 otp_appeared = True
                                 break
-                            check_c = (await safe_page_content(page)).lower()
+                            vis_c = await page.evaluate("() => (document.body ? document.body.innerText : '').toLowerCase()")
                             if (
-                                "something went wrong" in check_c 
-                                or "we can't complete your request right now" in check_c 
-                                or "try again later" in check_c 
-                                or "there's a temporary problem" in check_c
+                                "something went wrong" in vis_c 
+                                or "we can't complete your request right now" in vis_c 
                             ):
                                 hit_sww = True
                                 break
@@ -1795,12 +1810,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
                         try:
-                            cur_c = (await safe_page_content(page)).lower()
+                            vis_c = await page.evaluate("() => (document.body ? document.body.innerText : '').toLowerCase()")
                             if (
-                                "something went wrong" in cur_c 
-                                or "we can't complete your request right now" in cur_c 
-                                or "try again later" in cur_c 
-                                or "there's a temporary problem" in cur_c
+                                "something went wrong" in vis_c 
+                                or "we can't complete your request right now" in vis_c 
                             ):
                                 log_signal.emit(f"🛑 [Microsoft] Màn hình bị lỗi 'Something went wrong' với email {rec_email}. Đang tắt Chrome để đổi email...")
                                 raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}", failed_recovery=cur_recovery)
@@ -1849,12 +1862,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                                 if await page.is_visible("input[id^='codeEntry-']"):
                                     otp_appeared = True
                                     break
-                                check_c = (await safe_page_content(page)).lower()
+                                vis_check = await page.evaluate("() => (document.body ? document.body.innerText : '').toLowerCase()")
                                 if (
-                                    "something went wrong" in check_c 
-                                    or "we can't complete your request right now" in check_c 
-                                    or "try again later" in check_c 
-                                    or "there's a temporary problem" in check_c
+                                    "something went wrong" in vis_check 
+                                    or "we can't complete your request right now" in vis_check 
                                 ):
                                     hit_sww = True
                                     break
@@ -1917,12 +1928,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
 
                         log_signal.emit(f"📧 [Email {rec_idx+1}/{len(recovery_list)}] Thử email khôi phục: {rec_email}")
                         try:
-                            cur_c = (await safe_page_content(page)).lower()
+                            vis_c = await page.evaluate("() => (document.body ? document.body.innerText : '').toLowerCase()")
                             if (
-                                "something went wrong" in cur_c 
-                                or "we can't complete your request right now" in cur_c 
-                                or "try again later" in cur_c 
-                                or "there's a temporary problem" in cur_c
+                                "something went wrong" in vis_c 
+                                or "we can't complete your request right now" in vis_c 
                             ):
                                 log_signal.emit(f"🛑 [Microsoft] Đang ở trang 'Something went wrong'. Đang tắt Chrome để đổi email...")
                                 raise MicrosoftSessionResetException(f"Dính lỗi 'Something went wrong' khi gửi email {rec_email}", failed_recovery=cur_recovery)
@@ -1942,12 +1951,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                                 if await page.is_visible("input[type='tel'], input[name='otc'], input[id*='otc']"):
                                     otp_appeared = True
                                     break
-                                check_c = (await safe_page_content(page)).lower()
+                                vis_check = await page.evaluate("() => (document.body ? document.body.innerText : '').toLowerCase()")
                                 if (
-                                    "something went wrong" in check_c 
-                                    or "we can't complete your request right now" in check_c 
-                                    or "try again later" in check_c 
-                                    or "there's a temporary problem" in check_c
+                                    "something went wrong" in vis_check 
+                                    or "we can't complete your request right now" in vis_check 
                                 ):
                                     hit_sww = True
                                     break
@@ -2009,12 +2016,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     await asyncio.sleep(0.5)
 
                     # Check nếu bị dính màn hình lỗi "Something went wrong"
-                    content_b4 = (await safe_page_content(page)).lower()
+                    vis_b4 = await page.evaluate("() => (document.body ? document.body.innerText : '').toLowerCase()")
                     if (
-                        "something went wrong" in content_b4 
-                        or "we can't complete your request right now" in content_b4 
-                        or "try again later" in content_b4 
-                        or "there's a temporary problem" in content_b4
+                        "something went wrong" in vis_b4 
+                        or "we can't complete your request right now" in vis_b4 
                     ):
                         failed_rec = recovery_list[0] if recovery_list else None
                         log_signal.emit("🛑 [Microsoft] Phát hiện màn hình lỗi 'Something went wrong' tại Bước 4. Đang tắt Chrome để đổi email và chạy lại...")
