@@ -977,6 +977,224 @@ class MicrosoftSessionResetException(BaseException):
         return self.message
 
 
+def find_gemini_cli_executable():
+    """Tìm đường dẫn Gemini CLI (gemini.cmd / gemini) trên hệ thống."""
+    candidates = [
+        shutil.which("gemini.cmd"),
+        shutil.which("gemini"),
+        os.path.expandvars(r"%APPDATA%\npm\gemini.cmd"),
+        os.path.expandvars(r"%APPDATA%\npm\gemini"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+async def extract_dom_snapshot_for_gemini(page):
+    """Trích xuất tóm tắt DOM (chữ hiển thị + các nút/ô nhập) để gửi cho Gemini CLI phân tích."""
+    try:
+        snapshot = await page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+
+            const buildSelector = (el) => {
+                if (el.id) return '#' + CSS.escape(el.id);
+                const testId = el.getAttribute('data-testid');
+                if (testId) return `${el.tagName.toLowerCase()}[data-testid="${testId}"]`;
+                const name = el.getAttribute('name');
+                if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+                const aria = el.getAttribute('aria-label');
+                if (aria) return `${el.tagName.toLowerCase()}[aria-label="${aria.replace(/"/g, '\\"')}"]`;
+                const type = el.getAttribute('type');
+                if (type && el.tagName.toLowerCase() === 'input') return `input[type="${type}"]`;
+                return el.tagName.toLowerCase();
+            };
+
+            const rawEls = Array.from(document.querySelectorAll('button, input, select, a, [role="button"], [role="link"]'));
+            const elements = [];
+            for (const el of rawEls) {
+                if (!isVisible(el)) continue;
+                const tag = el.tagName.toLowerCase();
+                const type = el.getAttribute('type') || '';
+                if (type === 'hidden') continue;
+                const info = {
+                    tag: tag,
+                    type: type,
+                    selector: buildSelector(el),
+                    text: (el.innerText || el.value || '').trim().slice(0, 80),
+                    placeholder: el.getAttribute('placeholder') || '',
+                    aria_label: el.getAttribute('aria-label') || '',
+                };
+                if (type === 'password') info.text = '***';
+                if (tag === 'select') {
+                    info.options = Array.from(el.options || []).slice(0, 6).map(o => o.text.trim().slice(0, 60));
+                }
+                elements.push(info);
+                if (elements.length >= 35) break;
+            }
+
+            return {
+                url: window.location.href.slice(0, 220),
+                title: document.title || '',
+                visible_text: (document.body ? document.body.innerText : '').trim().slice(0, 1600),
+                elements: elements
+            };
+        }""")
+        return snapshot
+    except Exception:
+        return {"url": page.url, "title": "", "visible_text": "", "elements": []}
+
+
+def call_gemini_cli_sync(step_name, dom_snapshot, log_signal, timeout_sec=35):
+    """Gọi Gemini CLI ở chế độ non-interactive (-p) để phân tích trang bị kẹt và trả về JSON hành động."""
+    gemini_bin = find_gemini_cli_executable()
+    if not gemini_bin:
+        log_signal.emit("⚠️ [Gemini CLI] Không tìm thấy lệnh 'gemini' trên máy (cần cài @google/gemini-cli).")
+        return None
+
+    instruction = (
+        f"Bạn là trợ lý tự động hóa trình duyệt Microsoft OAuth2/Hotmail (đang ở {step_name}). "
+        "Tool bị kẹt ở màn hình dưới đây (có thể do Microsoft vừa đổi giao diện hoặc có popup/bước mới). "
+        "Hãy đọc DOM snapshot từ stdin và trả về DUY NHẤT 1 JSON object hợp lệ (không giải thích thêm, không markdown) theo cấu trúc:\n"
+        '{"diagnosis": "mô tả ngắn gọn tình huống bằng tiếng Việt", '
+        '"action": "click | fill_and_next | error | wait", '
+        '"selector": "CSS selector chính xác từ danh sách elements", '
+        '"next_selector": "CSS selector nút Next/Submit nếu action là fill_and_next (hoặc rỗng)", '
+        '"value_type": "email | password | recovery_email | none"}\n'
+        "Quy tắc:\n"
+        "- Nếu là màn hình Passkey/Windows Hello/Biometric -> chọn action='click' vào nút Cancel/Skip.\n"
+        "- Nếu là màn hình hỏi Stay signed in / Keep me signed in -> chọn action='click' vào nút Yes/Accept/Next.\n"
+        "- Nếu là màn hình cấp quyền app (Consent / Let this app access) -> chọn action='click' vào nút Accept/Continue.\n"
+        "- Nếu là màn hình thông báo/đồng ý điều khoản/bảo mật có nút Next/Continue/Skip/OK -> chọn action='click' vào nút đó.\n"
+        "- Nếu là màn hình yêu cầu nhập email khôi phục -> action='fill_and_next', value_type='recovery_email'.\n"
+        "- Nếu là màn hình bị khóa tài khoản, sai mật khẩu, captcha hoặc lỗi không thể tự qua -> action='error'."
+    )
+
+    stdin_data = json.dumps(dom_snapshot, ensure_ascii=False, indent=2)
+    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+    try:
+        proc = subprocess.Popen(
+            [gemini_bin, "-p", instruction, "-o", "text"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags
+        )
+        stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout_sec)
+
+        if proc.returncode != 0:
+            err_msg = (stderr or stdout or "").strip()
+            if "auth" in err_msg.lower() or "gemini_api_key" in err_msg.lower() or "settings.json" in err_msg.lower():
+                log_signal.emit("⚠️ [Gemini CLI] Chưa đăng nhập Gemini CLI! Hãy mở CMD gõ 'gemini' để đăng nhập Google 1 lần.")
+            else:
+                log_signal.emit(f"⚠️ [Gemini CLI] Trả về lỗi (code {proc.returncode}): {err_msg[:180]}")
+            return None
+
+        raw_out = (stdout or "").strip()
+        # Loại bỏ markdown code fence nếu Gemini có bọc ```json ... ```
+        raw_out = re.sub(r'^```(?:json)?\s*', '', raw_out, flags=re.I)
+        raw_out = re.sub(r'\s*```$', '', raw_out)
+        m = re.search(r'\{[\s\S]*\}', raw_out)
+        if not m:
+            log_signal.emit(f"⚠️ [Gemini CLI] Không parse được JSON phản hồi: {raw_out[:150]}")
+            return None
+        return json.loads(m.group(0))
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        log_signal.emit("⚠️ [Gemini CLI] Quá thời gian chờ phản hồi (timeout 35s).")
+        return None
+    except Exception as e:
+        log_signal.emit(f"⚠️ [Gemini CLI] Lỗi thực thi: {str(e)[:120]}")
+        return None
+
+
+async def run_gemini_cli_fallback(page, step_name, email, password, recovery_list, log_signal, pause_event):
+    """Chụp DOM hiện tại, nhờ Gemini CLI chẩn đoán và thực thi hành động đề xuất trên Playwright."""
+    await pause_event.wait()
+    snapshot = await extract_dom_snapshot_for_gemini(page)
+    result = await asyncio.to_thread(call_gemini_cli_sync, step_name, snapshot, log_signal)
+    if not result:
+        return "none"
+
+    diagnosis = result.get("diagnosis", "Không rõ tình huống")
+    action = (result.get("action") or "wait").lower().strip()
+    selector = (result.get("selector") or "").strip()
+    next_selector = (result.get("next_selector") or "").strip()
+    value_type = (result.get("value_type") or "none").lower().strip()
+
+    log_signal.emit(f"🤖 [Gemini CLI Chẩn đoán]: {diagnosis} | Hành động: {action}")
+
+    if action == "error":
+        return "error"
+
+    if action == "click" and selector:
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.scroll_into_view_if_needed()
+                await loc.click(timeout=5000, force=True)
+                log_signal.emit(f"🤖 [Gemini CLI] Đã bấm vào '{selector}'")
+                await asyncio.sleep(2)
+                return "acted"
+        except Exception as e:
+            log_signal.emit(f"⚠️ [Gemini CLI] Không click được '{selector}': {str(e)[:80]}")
+        return "none"
+
+    if action == "fill_and_next" and selector:
+        fill_val = ""
+        if value_type == "email":
+            fill_val = email
+        elif value_type == "password":
+            fill_val = password
+        elif value_type == "recovery_email" and recovery_list:
+            # Nếu trên trang có email che sao (du*****@...), ưu tiên chọn đúng mail khớp 2 chữ đầu
+            vis_txt = (snapshot.get("visible_text") or "").lower()
+            m_mask = re.search(r'([a-z0-9._%+-]+?)\*+@([a-z0-9.-]+)', vis_txt)
+            chosen_rec = recovery_list[0]
+            if m_mask:
+                p2 = m_mask.group(1)[:2]
+                for r in recovery_list:
+                    r_em = r.split('|')[0].strip().lower() if '|' in r else r.strip().lower()
+                    if r_em.startswith(p2):
+                        chosen_rec = r
+                        break
+            fill_val = chosen_rec.split('|')[0].strip() if '|' in chosen_rec else chosen_rec.strip()
+
+        if fill_val:
+            try:
+                inp = page.locator(selector).first
+                await inp.click(timeout=3000)
+                await inp.fill("")
+                await inp.fill(fill_val)
+                log_signal.emit(f"🤖 [Gemini CLI] Đã điền {value_type} vào '{selector}'")
+                await asyncio.sleep(0.5)
+                if next_selector:
+                    nxt = page.locator(next_selector).first
+                    if await nxt.count() > 0:
+                        await nxt.click(timeout=5000, force=True)
+                        log_signal.emit(f"🤖 [Gemini CLI] Đã bấm nút tiếp theo '{next_selector}'")
+                await asyncio.sleep(2)
+                return "acted"
+            except Exception as e:
+                log_signal.emit(f"⚠️ [Gemini CLI] Lỗi khi điền '{selector}': {str(e)[:80]}")
+        return "none"
+
+    return "wait"
+
+
 async def _run_single_account_session(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
     await pause_event.wait()
     if isinstance(recovery_list, str):
@@ -1321,6 +1539,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
             # BƯỚC 3: CHECK KHUNG BẢO MẬT / THÊM EMAIL KHÔI PHỤC & OTP / PASSKEY
             # ==========================================
             log_signal.emit(f"🛡️ [Bước 3] Kiểm tra khung bảo mật / email khôi phục...")
+            step3_stuck_iters = 0
             for _ in range(35):
                 await pause_event.wait()
                 await asyncio.sleep(1)
@@ -2015,8 +2234,20 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         log_signal.emit("⚠️ Đã thử hết danh sách email khôi phục.")
                     break
 
-                if "code=" in page.url or await page.is_visible("button:has-text('Accept')") or "consent" in page.url.lower():
+                if "code=" in page.url or await page.is_visible("button[data-testid='appConsentPrimaryButton'], button:has-text('Accept')") or "consent" in page.url.lower():
                     break
+
+                step3_stuck_iters += 1
+                if step3_stuck_iters in (8, 18, 28):
+                    log_signal.emit(f"🤖 [Gemini CLI] Bước 3 bị kẹt/delay {step3_stuck_iters}s -> Gọi Gemini CLI phân tích tình huống...")
+                    ai_res = await run_gemini_cli_fallback(
+                        page, "Bước 3 (Bảo mật / Xác minh)", email, password, recovery_list, log_signal, pause_event
+                    )
+                    if ai_res == "acted":
+                        step3_stuck_iters = 0
+                        continue
+                    elif ai_res == "error":
+                        break
 
             # ==========================================
             # BƯỚC 4: XỬ LÝ MÀN HÌNH CẤP QUYỀN (ACCEPT / SKIP) LẤY OAUTH2
@@ -2075,15 +2306,38 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     btn_text = await page.inner_text(sel_stay)
                     if btn_text in ["Yes", "Có", "Next", "Tiếp theo", "Tiếp tục"]:
                         await page.click(sel_stay)
+                        continue
+
+                if i in (8, 16):
+                    log_signal.emit(f"🤖 [Gemini CLI] Bước 4 bị kẹt ở vòng {i} -> Gọi Gemini CLI phân tích màn hình...")
+                    ai_res = await run_gemini_cli_fallback(
+                        page, "Bước 4 (Cấp quyền / Stay signed in)", email, password, recovery_list, log_signal, pause_event
+                    )
+                    if ai_res == "acted":
+                        continue
+                    elif ai_res == "error":
+                        break
 
             # LẤY CODE VÀ ĐỔI REFRESH TOKEN
             log_signal.emit(f"⏳ Đợi Redirect lấy Auth Code...")
             try:
-                await page.wait_for_url("**/nativeclient?code=*", timeout=30000)
+                await page.wait_for_url("**/nativeclient?code=*", timeout=25000)
                 final_url = page.url
-            except:
-                log_signal.emit(f"❌ Không bắt được URL chứa Code.")
-                return
+            except Exception:
+                log_signal.emit(f"🤖 [Gemini CLI] Quá thời gian chờ Auth Code -> Gọi Gemini CLI kiểm tra màn hình đang kẹt...")
+                ai_res = await run_gemini_cli_fallback(
+                    page, "Chờ Redirect lấy Auth Code", email, password, recovery_list, log_signal, pause_event
+                )
+                if ai_res == "acted":
+                    try:
+                        await page.wait_for_url("**/nativeclient?code=*", timeout=15000)
+                        final_url = page.url
+                    except Exception:
+                        log_signal.emit(f"❌ Không bắt được URL chứa Code.")
+                        return
+                else:
+                    log_signal.emit(f"❌ Không bắt được URL chứa Code.")
+                    return
 
             if "code=" in final_url:
                 auth_code = final_url.split("code=")[1].split("&")[0]
