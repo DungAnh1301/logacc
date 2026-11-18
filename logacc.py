@@ -2022,7 +2022,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
             # BƯỚC 4: XỬ LÝ MÀN HÌNH CẤP QUYỀN (ACCEPT / SKIP) LẤY OAUTH2
             # ==========================================
             log_signal.emit(f"🧭 [Bước 4] Đang xử lý màn hình cấp quyền (Accept/Skip) để lấy OAuth2...")
-            sel_accept = "button:has-text('Accept'), button:has-text('Chấp nhận')"
+            sel_accept = "button[data-testid='appConsentPrimaryButton'], button:has-text('Accept'), button:has-text('Chấp nhận'), input[value='Accept']"
             sel_skip = "a#iShowSkip, .internal-link:has-text('Skip for now')"
             sel_stay = "#idSIButton9"
 
@@ -2047,16 +2047,17 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                         raise MicrosoftSessionResetException("Dính lỗi 'Something went wrong' tại Bước 4", failed_recovery=failed_rec)
 
                     # Bỏ qua màn hình Passkey nếu xuất hiện ở bước này
-                    if "fido" in page.url.lower() or "setting up your passkey" in content_b4 or "create a passkey" in content_b4:
+                    if "fido" in page.url.lower() or "setting up your passkey" in vis_b4 or "create a passkey" in vis_b4:
                         btn_cancel = page.locator("button:has-text('Cancel'), input[value='Cancel'], #idBtn_Back, button:has-text('Hủy'), a:has-text('Cancel')")
                         if await btn_cancel.count() > 0:
                             await btn_cancel.first.click(timeout=3000)
                             await asyncio.sleep(1.5)
                             continue
 
-                    if await page.is_visible(sel_accept):
+                    accept_loc = page.locator(sel_accept).first
+                    if await accept_loc.count() > 0 and await accept_loc.is_visible():
                         log_signal.emit(f"📝 Đã thấy bảng Accept, đang bấm...")
-                        await page.click(sel_accept)
+                        await accept_loc.click(timeout=5000)
                         await asyncio.sleep(2) 
                         continue
                     
