@@ -356,7 +356,7 @@ def dismiss_tiktok_popups(page, log_callback=None):
     return dismissed
 
 # --- HÀM HỖ TRỢ LẤY OTP TỪ EMAIL KHÔI PHỤC (CHIẾN THUẬT 2 PHÚT / 20S) ---
-def get_outlook_otp_via_api(recovery_acc_str, log_signal):
+def get_outlook_otp_via_api(recovery_acc_str, log_signal, stop_event=None, pause_event=None):
     try:
         parts = recovery_acc_str.split('|')
         if len(parts) < 4:
@@ -365,6 +365,9 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal):
         
         ref_token = parts[2].strip()
         client_id = parts[3].strip()
+
+        if stop_event and stop_event.is_set():
+            return None
 
         log_signal.emit(f"🔄 Đang dùng OAuth2 của email khôi phục để lấy Access Token...")
         token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
@@ -394,6 +397,14 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal):
         start_time_loop = time.time()
 
         for attempt in range(20):
+            if stop_event and stop_event.is_set():
+                return None
+            if pause_event:
+                while not pause_event.is_set():
+                    if stop_event and stop_event.is_set():
+                        return None
+                    time.sleep(0.15)
+
             response = requests.get(messages_url, headers=headers, timeout=15)
             if response.status_code == 200:
                 messages = response.json().get('value', [])
@@ -416,7 +427,16 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal):
                                     log_signal.emit(f"🎯 Bắt được mã OTP mới (Nhận cách đây {int(time_diff)}s): {otp_code}")
                                     return otp_code
 
-            time.sleep(4)
+            # Chia nhỏ thời gian chờ 4s để phản hồi Stop/Pause ngay lập tức
+            for _ in range(20):
+                if stop_event and stop_event.is_set():
+                    return None
+                if pause_event:
+                    while not pause_event.is_set():
+                        if stop_event and stop_event.is_set():
+                            return None
+                        time.sleep(0.15)
+                time.sleep(0.2)
             log_signal.emit(f"⏳ Đang đợi thư OTP về (lần thử {attempt+1}/20)...")
 
         return None
@@ -2226,29 +2246,47 @@ class AutomationWorker(QThread):
                 recovery_changed_signal=self.recovery_changed_signal,
                 worker=self
             ))
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            self.log_signal.emit(f"❌ Lỗi luồng: {str(e)}")
-            safe_print(f"Lỗi luồng chi tiết:\n{tb}")
+            if not self._is_stopped:
+                import traceback
+                tb = traceback.format_exc()
+                self.log_signal.emit(f"❌ Lỗi luồng: {str(e)}")
+                safe_print(f"Lỗi luồng chi tiết:\n{tb}")
         finally:
-            loop.close()
+            try:
+                loop.close()
+            except Exception:
+                pass
             self.finished_signal.emit()
 
     def pause(self):
-        if self.pause_event:
-            self.pause_event.clear()
+        if self.loop and self.loop.is_running() and self.pause_event:
+            try:
+                self.loop.call_soon_threadsafe(self.pause_event.clear)
+            except Exception:
+                pass
 
     def resume(self):
-        if self.pause_event:
-            self.pause_event.set()
+        if self.loop and self.loop.is_running() and self.pause_event:
+            try:
+                self.loop.call_soon_threadsafe(self.pause_event.set)
+            except Exception:
+                pass
 
     def stop(self):
         self._is_stopped = True
-        if self.pause_event:
-            self.pause_event.set() 
         if self.loop and self.loop.is_running():
-            self.loop.stop()
+            try:
+                if self.pause_event:
+                    self.loop.call_soon_threadsafe(self.pause_event.set)
+                def _cancel_all():
+                    for task in asyncio.all_tasks(self.loop):
+                        task.cancel()
+                self.loop.call_soon_threadsafe(_cancel_all)
+            except Exception:
+                pass
 
 
 # ========================================================
@@ -3281,6 +3319,13 @@ class MainWindow(QWidget):
         super().__init__()
         self.worker = None
         self.vpn_gpm_running = False
+        self.otp_running = False
+        self.tiktok_update_running = False
+        self._auto_gpm_after_otp = False
+        self.active_gpm_profile = None
+        self.global_stop_event = threading.Event()
+        self.global_pause_event = threading.Event()
+        self.global_pause_event.set()
         self.otp_auto_timer = None
         self.background_log_signal.connect(self.update_log)
         self.vpn_gpm_finished_signal.connect(self.on_vpn_gpm_finished)
@@ -3290,6 +3335,38 @@ class MainWindow(QWidget):
 
         # Tự động quét API / khởi động GPM & giải License sau 1.2s khi mở app
         QTimer.singleShot(1200, self.trigger_scan_or_launch_gpm)
+
+    def wait_if_paused_or_stopped(self, sleep_seconds=0):
+        """Đợi nếu đang Tạm Dừng; trả về True nếu đã bấm STOP."""
+        if self.global_stop_event.is_set():
+            return True
+        if sleep_seconds > 0:
+            end_time = time.time() + sleep_seconds
+            while time.time() < end_time:
+                if self.global_stop_event.is_set():
+                    return True
+                while not self.global_pause_event.is_set():
+                    if self.global_stop_event.is_set():
+                        return True
+                    time.sleep(0.15)
+                remaining = end_time - time.time()
+                if remaining > 0:
+                    time.sleep(min(0.15, remaining))
+        else:
+            while not self.global_pause_event.is_set():
+                if self.global_stop_event.is_set():
+                    return True
+                time.sleep(0.15)
+        return self.global_stop_event.is_set()
+
+    def is_any_task_running(self):
+        return bool(
+            (self.worker and self.worker.isRunning())
+            or self.vpn_gpm_running
+            or self.otp_running
+            or self.tiktok_update_running
+            or (self.otp_auto_timer and self.otp_auto_timer.isActive())
+        )
 
     def on_gpm_api_detected(self, api_url):
         if api_url:
@@ -3476,14 +3553,21 @@ class MainWindow(QWidget):
         btn_all_results.setToolTip("Mở danh sách toàn bộ kết quả đã lấy thành công trong results.txt")
         btn_all_results.clicked.connect(self.open_results_dialog)
 
-        btn_get_otp_top = QPushButton("Lấy OTP")
+        btn_get_otp_top = QPushButton("📩 Lấy OTP")
         btn_get_otp_top.setStyleSheet("background-color: #0288d1; color: white; padding: 6px 12px; border-radius: 4px; font-weight: bold;")
-        btn_get_otp_top.clicked.connect(self.fetch_and_copy_otp)
+        btn_get_otp_top.setToolTip("Chỉ quét và copy mã OTP (không tự động mở GPM/VPN)")
+        btn_get_otp_top.clicked.connect(lambda: self.fetch_and_copy_otp(auto_gpm=False))
+
+        btn_get_otp_gpm_top = QPushButton("🚀 OTP + GPM")
+        btn_get_otp_gpm_top.setStyleSheet("background-color: #6a1b9a; color: white; padding: 6px 12px; border-radius: 4px; font-weight: bold;")
+        btn_get_otp_gpm_top.setToolTip("Lấy OTP xong tự động đếm 3s bật VPN + mở GPM")
+        btn_get_otp_gpm_top.clicked.connect(lambda: self.fetch_and_copy_otp(auto_gpm=True))
         
         row1.addWidget(self.result_output)
         row1.addWidget(btn_copy_res)
         row1.addWidget(btn_all_results)
         row1.addWidget(btn_get_otp_top)
+        row1.addWidget(btn_get_otp_gpm_top)
         result_container.addLayout(row1)
         main_layout.addLayout(result_container)
 
@@ -3500,7 +3584,8 @@ class MainWindow(QWidget):
 
         btn_copy_otp = QPushButton("Copy OTP")
         btn_copy_otp.setStyleSheet("padding: 10px; background-color: #d81b60; color: white; font-weight: bold; border-radius: 4px;")
-        btn_copy_otp.clicked.connect(self.fetch_and_copy_otp)
+        btn_copy_otp.setToolTip("Chỉ quét và copy mã OTP riêng (không chạy GPM)")
+        btn_copy_otp.clicked.connect(lambda: self.fetch_and_copy_otp(auto_gpm=False))
 
         # Nút ở vị trí thứ 4: Copy Link & Đổi VPN sang US
         self.btn_play_vpn_gpm = QPushButton("Play VPN+GPM")
@@ -4563,17 +4648,21 @@ class MainWindow(QWidget):
                 
                 # Thử kết nối lần lượt
                 for attempt in range(min(len(us_slugs), 3)):
+                    if self.wait_if_paused_or_stopped():
+                        return
                     server_slug = us_slugs[attempt]
                     self.background_log_signal.emit(f"🌐 [Lần {attempt+1}] Đang kết nối ExpressVPN tới: {server_slug.upper()}...")
                     
                     subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
-                    time.sleep(1.5)
+                    if self.wait_if_paused_or_stopped(1.5):
+                        return
                     subprocess.run(f'{cmd_path} connect "{server_slug}"', shell=True, capture_output=True)
                     
                     # Kiểm tra trạng thái trong 8 giây
                     is_connected = False
                     for _ in range(4):
-                        time.sleep(2)
+                        if self.wait_if_paused_or_stopped(2):
+                            return
                         res = subprocess.run(f'{cmd_path} status', shell=True, capture_output=True, text=True)
                         status_text = res.stdout.strip()
                         if "Connected to" in status_text or "connectionstate: Connected" in status_text or "Connected" in status_text:
@@ -4581,6 +4670,8 @@ class MainWindow(QWidget):
                             break
                     
                     if is_connected:
+                        if self.wait_if_paused_or_stopped():
+                            return
                         self.background_log_signal.emit(f"🌍 [Bước 2] VPN đã kết nối US ({server_slug.upper()}) thành công!")
                         self.open_gpm_profile_and_tiktok(profile_name, api_url, account_password=account_password)
                         return
@@ -4612,8 +4703,12 @@ class MainWindow(QWidget):
 
         api_url = api_url.rstrip('/')
         try:
+            if self.wait_if_paused_or_stopped():
+                return
             self.background_log_signal.emit(f"🧭 [Bước 3] Đang tìm profile GPM: {profile_name}")
             target = find_gpm_profile(api_url, profile_name)
+            if self.wait_if_paused_or_stopped():
+                return
             if not target:
                 self.background_log_signal.emit(f"⚡ Profile '{profile_name}' chưa có trên GPM -> Đang tự động gọi API tạo mới...")
                 cfg = load_gui_config()
@@ -4635,6 +4730,8 @@ class MainWindow(QWidget):
                 else:
                     raise RuntimeError(f"Không tìm thấy và không thể tự động tạo profile: {profile_name}")
 
+            if self.wait_if_paused_or_stopped():
+                return
             # Cấu hình Native 'Mute site' (Block sound) vào file Preferences của Profile GPM trước khi mở
             if target and target.get("profile_path"):
                 if set_gpm_profile_mute_site(target.get("profile_path")):
@@ -4655,6 +4752,7 @@ class MainWindow(QWidget):
             if not payload.get("success"):
                 raise RuntimeError(payload.get("message", "GPM từ chối mở profile"))
 
+            self.active_gpm_profile = (api_url, target['id'])
             remote_address = (payload.get("data") or {}).get("remote_debugging_address")
             if not remote_address:
                 raise RuntimeError("GPM không trả về remote_debugging_address")
@@ -4664,7 +4762,8 @@ class MainWindow(QWidget):
 
             # Đợi 3 giây sau khi bật Chrome để Chrome và extension ExpressVPN ổn định
             self.background_log_signal.emit("⏳ [GPM] Đã khởi động Chrome -> Đang đợi 3s để Chrome và tiện ích (ExpressVPN) ổn định...")
-            time.sleep(3)
+            if self.wait_if_paused_or_stopped(3):
+                return
 
             # 1. Kết nối Playwright tới trình duyệt GPM TRƯỚC TIÊN để cài đặt Mute ngay từ đầu
             try:
@@ -4675,6 +4774,8 @@ class MainWindow(QWidget):
                     browser = None
                     last_conn_err = None
                     for conn_attempt in range(1, 61):
+                        if self.wait_if_paused_or_stopped():
+                            return
                         try:
                             browser = p.chromium.connect_over_cdp(remote_address, timeout=4000)
                             if browser:
@@ -4683,7 +4784,8 @@ class MainWindow(QWidget):
                             last_conn_err = ce
                             if conn_attempt % 5 == 0:
                                 self.background_log_signal.emit(f"⏳ [GPM] Đang đợi Chrome mở cổng CDP ({conn_attempt}/60s)...")
-                            time.sleep(1)
+                            if self.wait_if_paused_or_stopped(1):
+                                return
 
                     if not browser:
                         raise Exception(f"Trình duyệt GPM chưa sẵn sàng kết nối CDP ({remote_address}) sau 60s: {last_conn_err}")
@@ -4832,7 +4934,8 @@ class MainWindow(QWidget):
 
                         # Đếm 3 giây sau khi chuyển sang tiktok qrcode và ép tab TikTok hiển thị trên cùng (tránh bị ExpressVPN cướp focus)
                         self.background_log_signal.emit("⏳ [TikTok] Đang đợi 3s để ổn định trang và giữ tab TikTok trên cùng...")
-                        time.sleep(3)
+                        if self.wait_if_paused_or_stopped(3):
+                            return
                         try:
                             target_tab.bring_to_front()
                         except Exception:
@@ -4844,6 +4947,8 @@ class MainWindow(QWidget):
                         qr_ready = False
                         already_logged_in = False
                         for attempt in range(1, 91):
+                            if self.wait_if_paused_or_stopped():
+                                return
                             # Tự động phát hiện và bấm đóng popup "Got it" / "Đã hiểu" / hướng dẫn nếu xuất hiện
                             dismiss_tiktok_popups(target_tab, self.background_log_signal)
 
@@ -4919,6 +5024,8 @@ class MainWindow(QWidget):
                             self.background_log_signal.emit("👀 [TikTok] Đang chờ bạn quét QR... Tool sẽ tự động chọn 'Password' và nhập mật khẩu hotmail nếu hiện bước xác minh!")
                             has_filled_pass = False
                             for scan_sec in range(1, 121):
+                                if self.wait_if_paused_or_stopped():
+                                    return
                                 dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                 try:
                                     # 1. Kiểm tra URL hoặc avatar đã đăng nhập thành công chưa
@@ -5090,7 +5197,8 @@ class MainWindow(QWidget):
                             do_avatar = self.cb_change_avatar.isChecked()
                             if do_nick or do_avatar:
                                 self.background_log_signal.emit("🚀 [Tự động] Đã đăng nhập TikTok thành công -> Tự động chuyển sang Đổi Tên Nick & Avatar sau 2s...")
-                                time.sleep(2)
+                                if self.wait_if_paused_or_stopped(2):
+                                    return
                                 self.trigger_change_name_avatar()
                             else:
                                 self.background_log_signal.emit("ℹ️ [TikTok] Đã đăng nhập TikTok thành công (Tùy chọn Đổi tên/Avatar đang tắt).")
@@ -5151,6 +5259,10 @@ class MainWindow(QWidget):
         acc_text = self.acc_input.text().strip() or self.result_output.text().strip()
         _, account_password, _ = extract_email_and_password(acc_text)
 
+        self.global_stop_event.clear()
+        self.global_pause_event.set()
+        self.btn_pause.setText("TẠM DỪNG")
+        self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
         self.vpn_gpm_running = True
         self.btn_play_vpn_gpm.setEnabled(False)
         self.log_output.append(
@@ -5305,6 +5417,10 @@ class MainWindow(QWidget):
             self.log_output.append("⚠️ Vui lòng nhập hoặc thêm ít nhất một email khôi phục dạng tk|mk|outh2|clientId!")
             return
 
+        self.global_stop_event.clear()
+        self.global_pause_event.set()
+        self.btn_pause.setText("TẠM DỪNG")
+        self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_start.setEnabled(False)
         self.result_output.clear()
         
@@ -5318,42 +5434,85 @@ class MainWindow(QWidget):
         self.log_output.append(f"🚀 Đã bấm PLAY -> Nhận diện Email: {email} | Danh sách Khôi phục: {len(recovery_list)} mail | Trình duyệt đang khởi động...")
 
     def toggle_pause(self):
-        if not self.worker or not self.worker.isRunning():
+        if not self.is_any_task_running():
             self.log_output.append("⚠️ Tiến trình chưa chạy để có thể tạm dừng!")
             return
             
         if self.btn_pause.text() == "TẠM DỪNG":
-            self.worker.pause()
+            self.global_pause_event.clear()
+            if self.worker and self.worker.isRunning():
+                self.worker.pause()
+            if self.otp_auto_timer and self.otp_auto_timer.isActive():
+                self.otp_auto_timer.stop()
+                self.log_output.append("⏸️ [Tự động] Đã tạm dừng bộ đếm 3s trước khi mở GPM.")
             self.btn_pause.setText("TIẾP TỤC")
-            self.btn_pause.setStyleSheet("padding: 12px; background-color: #2196f3; color: white; font-weight: bold; border-radius: 4px;")
-            self.log_output.append("⏸️ Đã TẠM DỪNG trình duyệt. Sếp có thể tha hồ soi HTML/Element trên Chrome!")
+            self.btn_pause.setStyleSheet("padding: 10px; background-color: #2196f3; color: white; font-weight: bold; border-radius: 4px;")
+            self.log_output.append("⏸️ Đã TẠM DỪNG tiến trình hiện tại!")
         else:
-            self.worker.resume()
+            self.global_pause_event.set()
+            if self.worker and self.worker.isRunning():
+                self.worker.resume()
             self.btn_pause.setText("TẠM DỪNG")
-            self.btn_pause.setStyleSheet("padding: 12px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
+            self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
             self.log_output.append("▶️ Đã TIẾP TỤC chạy lại tiến trình!")
 
     def stop_process(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.terminate()
-            self.btn_start.setEnabled(True)
-            self.btn_pause.setText("TẠM DỪNG")
-            self.btn_pause.setStyleSheet("padding: 12px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
-            self.log_output.append("🛑 Đã bấm STOP, đã tắt tiến trình và đóng trình duyệt!")
-        
-        # Tự động ngắt kết nối ExpressVPN khi bấm Stop
-        try:
-            cmd_path = r'cd /d "C:\Program Files\ExpressVPN" && .\expressvpnctl'
-            subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
-            self.log_output.append("🌐 [VPN] Đã tự động ngắt kết nối (Disconnect ExpressVPN).")
-        except Exception as e:
-            self.log_output.append(f"⚠️ [VPN] Không thể ngắt VPN tự động: {str(e)}")
+        # 1. Kích hoạt cờ dừng toàn cục và mở khóa pause để mọi luồng đang đợi thoát ngay lập tức
+        self.global_stop_event.set()
+        self.global_pause_event.set()
 
-        # Hủy đếm giờ tự động chạy VPN+GPM nếu đang đếm
+        # 2. Hủy đếm giờ tự động chạy VPN+GPM nếu đang đếm
         if self.otp_auto_timer and self.otp_auto_timer.isActive():
             self.otp_auto_timer.stop()
             self.log_output.append("⏹️ [Tự động] Đã hủy đếm giờ tự động chạy VPN+GPM do đã bấm STOP.")
+
+        # 3. Dừng luồng AutomationWorker (PLAY) sạch sẽ để Playwright đóng Chrome
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            if not self.worker.wait(1500):
+                self.worker.terminate()
+            self.log_output.append("🛑 Đã bấm STOP, đã tắt tiến trình PLAY và đóng trình duyệt!")
+
+        # 4. Dừng các luồng chạy nền khác (VPN+GPM, OTP, TikTok)
+        if self.vpn_gpm_running:
+            self.vpn_gpm_running = False
+            self.btn_play_vpn_gpm.setEnabled(True)
+            self.log_output.append("🛑 Đã dừng tiến trình VPN + GPM!")
+
+        if self.otp_running:
+            self.otp_running = False
+            self.log_output.append("🛑 Đã dừng tiến trình quét OTP!")
+
+        if self.tiktok_update_running:
+            self.tiktok_update_running = False
+            self.log_output.append("🛑 Đã dừng tiến trình Đổi Tên + Avatar!")
+
+        # 5. Đóng profile GPM đang mở (nếu có) ở luồng nền tránh lag UI
+        if self.active_gpm_profile:
+            api_url, pid = self.active_gpm_profile
+            self.active_gpm_profile = None
+            def _close_gpm():
+                try:
+                    requests.get(f"{api_url}/profiles/close/{pid}", timeout=5)
+                except Exception:
+                    pass
+            threading.Thread(target=_close_gpm, daemon=True).start()
+            self.log_output.append("🛑 [GPM] Đang đóng trình duyệt profile GPM...")
+
+        # 6. Khôi phục trạng thái nút bấm
+        self.btn_start.setEnabled(True)
+        self.btn_pause.setText("TẠM DỪNG")
+        self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
+        
+        # 7. Tự động ngắt kết nối ExpressVPN ở luồng nền khi bấm Stop
+        def _disconnect_vpn():
+            try:
+                cmd_path = r'cd /d "C:\Program Files\ExpressVPN" && .\expressvpnctl'
+                subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
+                self.background_log_signal.emit("🌐 [VPN] Đã tự động ngắt kết nối (Disconnect ExpressVPN).")
+            except Exception as e:
+                self.background_log_signal.emit(f"⚠️ [VPN] Không thể ngắt VPN tự động: {str(e)}")
+        threading.Thread(target=_disconnect_vpn, daemon=True).start()
 
         # Tự động chuyển sang tài khoản tiếp theo trong danh sách và profile GPM tiếp theo khi bấm STOP
         self.advance_target_account()
@@ -5388,29 +5547,37 @@ class MainWindow(QWidget):
 
     def on_otp_received(self, otp):
         """Nhận kết quả OTP từ luồng ngầm và copy vào clipboard an toàn trên main thread"""
+        self.otp_running = False
+        if self.global_stop_event.is_set():
+            return
         if otp:
             QApplication.clipboard().setText(otp)
             self.log_output.append(f"🎯 ĐÃ COPY MÃ OTP VÀO BỘ NHỚ TẠM: {otp}")
-            # Đếm 3s tự động chạy VPN+GPM theo yêu cầu
-            self.log_output.append("⏳ [Tự động] Đã lấy OTP thành công -> Đang đếm 3s để tự động khởi chạy VPN+GPM...")
-            if not self.otp_auto_timer:
-                self.otp_auto_timer = QTimer(self)
-                self.otp_auto_timer.setSingleShot(True)
-                self.otp_auto_timer.timeout.connect(self.auto_start_vpn_gpm_after_otp)
-            self.otp_auto_timer.stop()
-            self.otp_auto_timer.start(3000)
+            if self._auto_gpm_after_otp:
+                # Đếm 3s tự động chạy VPN+GPM
+                self.log_output.append("⏳ [OTP + GPM] Đã lấy OTP thành công -> Đang đếm 3s để tự động khởi chạy VPN+GPM...")
+                if not self.otp_auto_timer:
+                    self.otp_auto_timer = QTimer(self)
+                    self.otp_auto_timer.setSingleShot(True)
+                    self.otp_auto_timer.timeout.connect(self.auto_start_vpn_gpm_after_otp)
+                self.otp_auto_timer.stop()
+                self.otp_auto_timer.start(3000)
+            else:
+                self.log_output.append("✅ [Chỉ lấy OTP] Đã lấy và copy OTP xong (không tự động mở GPM/VPN).")
         else:
             self.log_output.append("❌ Không tìm thấy mã OTP nào từ tài khoản này!")
 
     def auto_start_vpn_gpm_after_otp(self):
         """Tự động kích hoạt VPN+GPM sau 3s khi nhận OTP thành công"""
+        if self.global_stop_event.is_set():
+            return
         if self.vpn_gpm_running:
             self.log_output.append("ℹ️ [Tự động] Quy trình VPN+GPM hiện đang chạy sẵn.")
             return
         self.log_output.append("🚀 [Tự động] Hết 3s -> Bắt đầu tự động kích hoạt Play VPN+GPM...")
         self.copy_link_and_vpn()
 
-    def fetch_and_copy_otp(self):
+    def fetch_and_copy_otp(self, auto_gpm=False):
         """Quét và lấy mã OTP qua API ngầm trong luồng riêng, không làm đơ/lag giao diện (GUI)"""
         # 1. Thử lấy từ ô kết quả trước
         result_acc = self.result_output.text().strip()
@@ -5435,8 +5602,16 @@ class MainWindow(QWidget):
             self.log_output.append("⚠️ Chưa có thông tin OAuth2 hợp lệ để lấy OTP! Vui lòng chọn tài khoản đã hoàn thành hoặc có mã OAuth2.")
             return
 
+        self.global_stop_event.clear()
+        self.global_pause_event.set()
+        self._auto_gpm_after_otp = bool(auto_gpm)
+        self.otp_running = True
+        self.btn_pause.setText("TẠM DỪNG")
+        self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
+
+        mode_label = "OTP + GPM" if self._auto_gpm_after_otp else "Chỉ lấy OTP"
         target_recovery_str = f"dummy|dummy|{outh2}|{client_id}"
-        self.log_output.append("🚀 Đang khởi chạy luồng quét OTP ngầm (giao diện không bị lag)...")
+        self.log_output.append(f"🚀 [{mode_label}] Đang khởi chạy luồng quét OTP ngầm...")
         
         def run_otp_worker():
             class ThreadSignal:
@@ -5447,11 +5622,17 @@ class MainWindow(QWidget):
 
             sig = ThreadSignal(self.background_log_signal.emit)
             try:
-                otp = get_outlook_otp_via_api(target_recovery_str, sig)
+                otp = get_outlook_otp_via_api(
+                    target_recovery_str, sig,
+                    stop_event=self.global_stop_event,
+                    pause_event=self.global_pause_event
+                )
                 self.otp_received_signal.emit(otp or "")
             except Exception as e:
                 self.background_log_signal.emit(f"❌ Lỗi trong luồng lấy OTP: {str(e)}")
                 self.otp_received_signal.emit("")
+            finally:
+                self.otp_running = False
 
         threading.Thread(target=run_otp_worker, daemon=True).start()
 
