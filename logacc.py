@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -644,6 +644,7 @@ RESULTS_FILE = os.path.join(APP_DIR, "results.txt")
 NICKNAMES_FILE = os.path.join(APP_DIR, "nicknames.txt")
 AVATARS_DIR = os.path.join(APP_DIR, "avatars")
 GUI_CONFIG_FILE = os.path.join(APP_DIR, "gui_config.json")
+GEMINI_RULES_FILE = os.path.join(APP_DIR, "gemini_learned_rules.json")
 DEFAULT_CLIENT_ID = "b849bc72-dc2c-492f-b087-71e84e926496"
 
 os.makedirs(AVATARS_DIR, exist_ok=True)
@@ -993,6 +994,120 @@ def find_gemini_cli_executable():
     return None
 
 
+def check_gemini_cli_auth_status():
+    """Kiểm tra trạng thái cài đặt và đăng nhập của Gemini CLI."""
+    gemini_bin = find_gemini_cli_executable()
+    if not gemini_bin:
+        return False, False, "Chưa cài đặt Gemini CLI (@google/gemini-cli)"
+
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") or os.environ.get("GOOGLE_GENAI_USE_GCA"):
+        return True, True, "Đã cấu hình qua biến môi trường"
+
+    gemini_dir = os.path.join(os.path.expanduser("~"), ".gemini")
+    oauth_file = os.path.join(gemini_dir, "oauth_creds.json")
+    google_accounts = os.path.join(gemini_dir, "google_accounts.json")
+    settings_file = os.path.join(gemini_dir, "settings.json")
+
+    if os.path.isfile(oauth_file) or os.path.isfile(google_accounts):
+        return True, True, "Đã đăng nhập tài khoản Google"
+
+    if os.path.isfile(settings_file):
+        try:
+            with open(settings_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("selectedAuthType") or data.get("security", {}).get("auth", {}).get("selectedType"):
+                    return True, True, "Đã cấu hình Auth trong settings.json"
+        except Exception:
+            pass
+
+    return True, False, "Đã cài Gemini CLI nhưng chưa đăng nhập"
+
+
+def load_gemini_learned_rules():
+    if os.path.isfile(GEMINI_RULES_FILE):
+        try:
+            with open(GEMINI_RULES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception:
+            pass
+    return []
+
+
+def save_gemini_learned_rule(title, url, action, selector, next_selector="", value_type="none", diagnosis=""):
+    """Lưu lại selector/luật HTML mới mà Gemini CLI vừa tìm ra để lần sau tự chạy ngay không cần hỏi lại AI."""
+    if not selector or action not in ("click", "fill_and_next"):
+        return
+    try:
+        rules = load_gemini_learned_rules()
+        url_path = url.split("?")[0].lower()[:120] if url else ""
+        title_low = (title or "").strip().lower()
+        new_rule = {
+            "title": title_low,
+            "url_prefix": url_path,
+            "action": action,
+            "selector": selector,
+            "next_selector": next_selector,
+            "value_type": value_type,
+            "diagnosis": diagnosis
+        }
+        # Tránh lưu trùng lặp
+        for r in rules:
+            if r.get("title") == title_low and r.get("selector") == selector and r.get("action") == action:
+                return
+        rules.append(new_rule)
+        with open(GEMINI_RULES_FILE, "w", encoding="utf-8") as f:
+            json.dump(rules, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+async def try_apply_gemini_learned_rules(page, email, password, recovery_list, log_signal):
+    """Kiểm tra nhanh xem trang hiện tại có khớp rule HTML nào đã được Gemini học trước đó không."""
+    rules = load_gemini_learned_rules()
+    if not rules:
+        return False
+    try:
+        cur_title = (await page.title()).strip().lower()
+        cur_url = page.url.split("?")[0].lower()
+        for rule in rules:
+            r_title = rule.get("title", "")
+            r_url = rule.get("url_prefix", "")
+            if (r_title and r_title == cur_title) or (r_url and r_url in cur_url):
+                sel = rule.get("selector", "")
+                act = rule.get("action", "")
+                if not sel:
+                    continue
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    if act == "click":
+                        await loc.click(timeout=4000, force=True)
+                        log_signal.emit(f"⚡ [Auto-Rule đã học] Tự động bấm '{sel}' ({rule.get('diagnosis', '')})")
+                        await asyncio.sleep(2)
+                        return True
+                    elif act == "fill_and_next":
+                        vtype = rule.get("value_type", "none")
+                        fill_val = ""
+                        if vtype == "email":
+                            fill_val = email
+                        elif vtype == "password":
+                            fill_val = password
+                        elif vtype == "recovery_email" and recovery_list:
+                            fill_val = recovery_list[0].split('|')[0].strip() if '|' in recovery_list[0] else recovery_list[0].strip()
+                        if fill_val:
+                            await loc.fill("")
+                            await loc.fill(fill_val)
+                            nxt = rule.get("next_selector", "")
+                            if nxt and await page.locator(nxt).count() > 0:
+                                await page.locator(nxt).first.click(timeout=4000, force=True)
+                            log_signal.emit(f"⚡ [Auto-Rule đã học] Tự động điền {vtype} vào '{sel}'")
+                            await asyncio.sleep(2)
+                            return True
+    except Exception:
+        pass
+    return False
+
+
 async def extract_dom_snapshot_for_gemini(page):
     """Trích xuất tóm tắt DOM (chữ hiển thị + các nút/ô nhập) để gửi cho Gemini CLI phân tích."""
     try:
@@ -1149,6 +1264,8 @@ async def run_gemini_cli_fallback(page, step_name, email, password, recovery_lis
                 await loc.scroll_into_view_if_needed()
                 await loc.click(timeout=5000, force=True)
                 log_signal.emit(f"🤖 [Gemini CLI] Đã bấm vào '{selector}'")
+                save_gemini_learned_rule(snapshot.get("title", ""), snapshot.get("url", ""), "click", selector, diagnosis=diagnosis)
+                log_signal.emit("💾 [Gemini CLI] Đã lưu luật HTML mới để lần sau tự chạy ngay!")
                 await asyncio.sleep(2)
                 return "acted"
         except Exception as e:
@@ -1188,6 +1305,8 @@ async def run_gemini_cli_fallback(page, step_name, email, password, recovery_lis
                     if await nxt.count() > 0:
                         await nxt.click(timeout=5000, force=True)
                         log_signal.emit(f"🤖 [Gemini CLI] Đã bấm nút tiếp theo '{next_selector}'")
+                save_gemini_learned_rule(snapshot.get("title", ""), snapshot.get("url", ""), "fill_and_next", selector, next_selector=next_selector, value_type=value_type, diagnosis=diagnosis)
+                log_signal.emit("💾 [Gemini CLI] Đã lưu luật HTML mới để lần sau tự chạy ngay!")
                 await asyncio.sleep(2)
                 return "acted"
             except Exception as e:
@@ -2240,6 +2359,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     break
 
                 step3_stuck_iters += 1
+                if step3_stuck_iters == 2:
+                    if await try_apply_gemini_learned_rules(page, email, password, recovery_list, log_signal):
+                        step3_stuck_iters = 0
+                        continue
                 if step3_stuck_iters in (8, 18, 28):
                     log_signal.emit(f"🤖 [Gemini CLI] Bước 3 bị kẹt/delay {step3_stuck_iters}s -> Gọi Gemini CLI phân tích tình huống...")
                     ai_res = await run_gemini_cli_fallback(
@@ -3887,12 +4010,17 @@ class MainWindow(QWidget):
         self.btn_update.setStyleSheet("padding: 10px; background-color: #1565c0; color: white; border-radius: 4px; font-weight: bold;")
         self.btn_update.clicked.connect(self.manual_check_update)
 
-        # Đưa cả 5 nút vào row3 với stretch=1 để khớp thẳng cột với row2
+        self.btn_gemini_cli = QPushButton("🤖 Gemini CLI")
+        self.btn_gemini_cli.setStyleSheet("padding: 10px; background-color: #4a148c; color: white; border-radius: 4px; font-weight: bold;")
+        self.btn_gemini_cli.setToolTip("Kiểm tra trạng thái hoặc mở cửa sổ đăng nhập Gemini CLI")
+        self.btn_gemini_cli.clicked.connect(self.open_gemini_cli_login)
+
         row3.addWidget(self.btn_start, stretch=1)
         row3.addWidget(self.btn_pause, stretch=1)
         row3.addWidget(self.btn_stop, stretch=1)
         row3.addWidget(self.btn_clear, stretch=1)
         row3.addWidget(self.btn_update, stretch=1)
+        row3.addWidget(self.btn_gemini_cli, stretch=1)
         main_layout.addLayout(row3)
 
         # Khu vực hiển thị Log
@@ -5917,6 +6045,34 @@ class MainWindow(QWidget):
         has_updated = check_auto_update(silent=False, parent_widget=self)
         if not has_updated:
             self.btn_update.setEnabled(True)
+
+    def open_gemini_cli_login(self):
+        """Kiểm tra trạng thái Gemini CLI và mở cửa sổ CMD để đăng nhập tài khoản Google."""
+        installed, logged_in, detail = check_gemini_cli_auth_status()
+        rules_count = len(load_gemini_learned_rules())
+        if not installed:
+            self.log_output.append("⚠️ Chưa cài Gemini CLI! Mở CMD chạy lệnh: npm install -g @google/gemini-cli")
+            return
+
+        if logged_in:
+            self.log_output.append(f"✅ [Gemini CLI] {detail} | Số luật HTML đã tự học: {rules_count}")
+            reply = QMessageBox.question(
+                self,
+                "Gemini CLI đã sẵn sàng",
+                f"Trạng thái: {detail}\nSố luật HTML đã học: {rules_count}\n\nBạn có muốn mở cửa sổ Gemini CLI (CMD) để kiểm tra hoặc đổi tài khoản không?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        else:
+            self.log_output.append(f"⚠️ [Gemini CLI] {detail} -> Đang mở cửa sổ đăng nhập Google...")
+
+        gemini_bin = find_gemini_cli_executable()
+        try:
+            subprocess.Popen(f'start "Gemini CLI Login" cmd /k "{gemini_bin}"', shell=True)
+            self.log_output.append("🚀 Đã mở cửa sổ Gemini CLI -> Hãy chọn 'Login with Google' trên cửa sổ đó để đăng nhập xong là dùng được!")
+        except Exception as e:
+            self.log_output.append(f"❌ Không thể mở Gemini CLI: {str(e)}")
 
 def main():
     # Tự động kiểm tra bản cập nhật mới từ GitHub mỗi lần khởi động tool
