@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -188,7 +188,9 @@ def check_auto_update(silent=False, parent_widget=None):
                 remote_hash = hashlib.sha256(remote_code.replace(b'\r\n', b'\n')).hexdigest()
 
                 if local_hash != remote_hash:
-                    msg = "🚀 Phát hiện phiên bản mới trên GitHub! Đang tiến hành cập nhật..."
+                    m_ver = re.search(rb'APP_VERSION\s*=\s*["\']([^"\']+)["\']', remote_code)
+                    remote_ver = m_ver.group(1).decode('utf-8', errors='ignore') if m_ver else "mới"
+                    msg = f"🚀 Phát hiện phiên bản v{remote_ver} trên GitHub (hiện tại: v{APP_VERSION})! Đang tiến hành cập nhật..."
                     safe_print(msg)
                     if parent_widget and hasattr(parent_widget, "update_log"):
                         parent_widget.update_log(msg)
@@ -223,7 +225,7 @@ def check_auto_update(silent=False, parent_widget=None):
                     return True
                 else:
                     if not silent:
-                        msg = "✅ Bạn đang dùng phiên bản mới nhất."
+                        msg = f"✅ Bạn đang dùng phiên bản mới nhất (v{APP_VERSION})."
                         safe_print(msg)
                         if parent_widget and hasattr(parent_widget, "update_log"):
                             parent_widget.update_log(msg)
