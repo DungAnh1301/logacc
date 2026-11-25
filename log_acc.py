@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -980,6 +980,20 @@ class MicrosoftSessionResetException(BaseException):
         return self.message
 
 
+def find_agy_cli_executable():
+    """Tìm đường dẫn Antigravity CLI (agy.exe) trên hệ thống (đã đăng nhập sẵn theo Antigravity)."""
+    candidates = [
+        shutil.which("agy.exe"),
+        shutil.which("agy"),
+        os.path.expandvars(r"%LOCALAPPDATA%\agy\bin\agy.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\antigravity\bin\agy.exe"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
 def find_gemini_cli_executable():
     """Tìm đường dẫn Gemini CLI (gemini.cmd / gemini) trên hệ thống."""
     candidates = [
@@ -994,33 +1008,28 @@ def find_gemini_cli_executable():
     return None
 
 
+def get_saved_gemini_api_key():
+    """Lấy Gemini API Key từ gui_config.json hoặc biến môi trường (nếu người dùng có nhập)."""
+    cfg = load_gui_config()
+    key = (cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY") or "").strip()
+    return key
+
+
 def check_gemini_cli_auth_status():
-    """Kiểm tra trạng thái cài đặt và đăng nhập của Gemini CLI."""
+    """Kiểm tra trạng thái sẵn sàng của AI CLI (ưu tiên API Key -> Antigravity agy.exe -> Gemini CLI)."""
+    api_key = get_saved_gemini_api_key()
+    if api_key:
+        return True, True, "Đang dùng Gemini API Key (Phản hồi siêu tốc ~1s)"
+
+    agy_bin = find_agy_cli_executable()
+    if agy_bin:
+        return True, True, f"Đã tự động kết nối Antigravity CLI ({os.path.basename(agy_bin)}) — Sẵn sàng dùng ngay!"
+
     gemini_bin = find_gemini_cli_executable()
     if not gemini_bin:
-        return False, False, "Chưa cài đặt Gemini CLI (@google/gemini-cli)"
+        return False, False, "Chưa có Antigravity CLI (agy) và chưa nhập Gemini API Key"
 
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") or os.environ.get("GOOGLE_GENAI_USE_GCA"):
-        return True, True, "Đã cấu hình qua biến môi trường"
-
-    gemini_dir = os.path.join(os.path.expanduser("~"), ".gemini")
-    oauth_file = os.path.join(gemini_dir, "oauth_creds.json")
-    google_accounts = os.path.join(gemini_dir, "google_accounts.json")
-    settings_file = os.path.join(gemini_dir, "settings.json")
-
-    if os.path.isfile(oauth_file) or os.path.isfile(google_accounts):
-        return True, True, "Đã đăng nhập tài khoản Google"
-
-    if os.path.isfile(settings_file):
-        try:
-            with open(settings_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if data.get("selectedAuthType") or data.get("security", {}).get("auth", {}).get("selectedType"):
-                    return True, True, "Đã cấu hình Auth trong settings.json"
-        except Exception:
-            pass
-
-    return True, False, "Đã cài Gemini CLI nhưng chưa đăng nhập"
+    return True, False, "Cần nhập Gemini API Key (Google đã ngừng Sign in with Google cá nhân trên Gemini CLI cũ)"
 
 
 def load_gemini_learned_rules():
@@ -1168,17 +1177,22 @@ async def extract_dom_snapshot_for_gemini(page):
         return {"url": page.url, "title": "", "visible_text": "", "elements": []}
 
 
-def call_gemini_cli_sync(step_name, dom_snapshot, log_signal, timeout_sec=35):
-    """Gọi Gemini CLI ở chế độ non-interactive (-p) để phân tích trang bị kẹt và trả về JSON hành động."""
-    gemini_bin = find_gemini_cli_executable()
-    if not gemini_bin:
-        log_signal.emit("⚠️ [Gemini CLI] Không tìm thấy lệnh 'gemini' trên máy (cần cài @google/gemini-cli).")
+def _parse_ai_json_response(raw_out):
+    raw_out = (raw_out or "").strip()
+    raw_out = re.sub(r'^```(?:json)?\s*', '', raw_out, flags=re.I)
+    raw_out = re.sub(r'\s*```$', '', raw_out)
+    m = re.search(r'\{[\s\S]*\}', raw_out)
+    if not m:
         return None
+    return json.loads(m.group(0))
 
+
+def call_gemini_cli_sync(step_name, dom_snapshot, log_signal, timeout_sec=55):
+    """Gọi AI (ưu tiên Gemini API Key -> Antigravity CLI agy.exe -> Gemini CLI) để phân tích trang bị kẹt và trả về JSON hành động."""
     instruction = (
         f"Bạn là trợ lý tự động hóa trình duyệt Microsoft OAuth2/Hotmail (đang ở {step_name}). "
         "Tool bị kẹt ở màn hình dưới đây (có thể do Microsoft vừa đổi giao diện hoặc có popup/bước mới). "
-        "Hãy đọc DOM snapshot từ stdin và trả về DUY NHẤT 1 JSON object hợp lệ (không giải thích thêm, không markdown) theo cấu trúc:\n"
+        "Hãy đọc DOM snapshot dưới đây và trả về DUY NHẤT 1 JSON object hợp lệ (không giải thích thêm, không markdown) theo cấu trúc:\n"
         '{"diagnosis": "mô tả ngắn gọn tình huống bằng tiếng Việt", '
         '"action": "click | fill_and_next | error | wait", '
         '"selector": "CSS selector chính xác từ danh sách elements", '
@@ -1192,11 +1206,73 @@ def call_gemini_cli_sync(step_name, dom_snapshot, log_signal, timeout_sec=35):
         "- Nếu là màn hình yêu cầu nhập email khôi phục -> action='fill_and_next', value_type='recovery_email'.\n"
         "- Nếu là màn hình bị khóa tài khoản, sai mật khẩu, captcha hoặc lỗi không thể tự qua -> action='error'."
     )
+    snapshot_str = json.dumps(dom_snapshot, ensure_ascii=False, indent=2)
+    full_prompt = f"{instruction}\n\nDOM SNAPSHOT:\n{snapshot_str}"
 
-    stdin_data = json.dumps(dom_snapshot, ensure_ascii=False, indent=2)
+    # 1. Ưu tiên Gemini API Key trực tiếp (nếu người dùng đã lưu -> siêu nhanh ~1s)
+    api_key = get_saved_gemini_api_key()
+    if api_key:
+        for model_name in ("gemini-2.5-flash", "gemini-2.0-flash"):
+            try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                resp = requests.post(
+                    url,
+                    json={"contents": [{"parts": [{"text": full_prompt}]}]},
+                    timeout=20
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    txt = data["candidates"][0]["content"]["parts"][0]["text"]
+                    parsed = _parse_ai_json_response(txt)
+                    if parsed:
+                        return parsed
+            except Exception:
+                pass
+
     creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+    # 2. Dùng Antigravity CLI (agy.exe) đã đăng nhập sẵn trên máy (không cần đăng nhập lại!)
+    agy_bin = find_agy_cli_executable()
+    if agy_bin:
+        for cmd_args in (
+            [agy_bin, "-p", full_prompt, "--model", "gemini-3.8-flash-low", "--disable-slash-commands"],
+            [agy_bin, "-p", full_prompt, "--effort", "low", "--disable-slash-commands"],
+        ):
+            try:
+                proc = subprocess.Popen(
+                    cmd_args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=creation_flags
+                )
+                stdout, stderr = proc.communicate(timeout=timeout_sec)
+                if proc.returncode == 0 and stdout:
+                    parsed = _parse_ai_json_response(stdout)
+                    if parsed:
+                        return parsed
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                log_signal.emit(f"⚠️ [Antigravity CLI] Quá thời gian chờ phản hồi ({timeout_sec}s).")
+                return None
+            except Exception:
+                pass
+
+    # 3. Dự phòng Gemini CLI (nếu máy khác không có agy nhưng có GEMINI_API_KEY)
+    gemini_bin = find_gemini_cli_executable()
+    if not gemini_bin:
+        log_signal.emit("⚠️ [AI Fallback] Không tìm thấy Antigravity CLI (agy) và chưa nhập Gemini API Key.")
+        return None
+
     try:
+        env = os.environ.copy()
+        if api_key:
+            env["GEMINI_API_KEY"] = api_key
         proc = subprocess.Popen(
             [gemini_bin, "-p", instruction, "-o", "text"],
             stdin=subprocess.PIPE,
@@ -1205,36 +1281,24 @@ def call_gemini_cli_sync(step_name, dom_snapshot, log_signal, timeout_sec=35):
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             creationflags=creation_flags
         )
-        stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout_sec)
-
+        stdout, stderr = proc.communicate(input=snapshot_str, timeout=timeout_sec)
         if proc.returncode != 0:
             err_msg = (stderr or stdout or "").strip()
-            if "auth" in err_msg.lower() or "gemini_api_key" in err_msg.lower() or "settings.json" in err_msg.lower():
-                log_signal.emit("⚠️ [Gemini CLI] Chưa đăng nhập Gemini CLI! Hãy mở CMD gõ 'gemini' để đăng nhập Google 1 lần.")
-            else:
-                log_signal.emit(f"⚠️ [Gemini CLI] Trả về lỗi (code {proc.returncode}): {err_msg[:180]}")
+            log_signal.emit(f"⚠️ [Gemini CLI] Bấm nút '🤖 Gemini CLI' để kiểm tra hoặc nhập API Key ({err_msg[:120]})")
             return None
-
-        raw_out = (stdout or "").strip()
-        # Loại bỏ markdown code fence nếu Gemini có bọc ```json ... ```
-        raw_out = re.sub(r'^```(?:json)?\s*', '', raw_out, flags=re.I)
-        raw_out = re.sub(r'\s*```$', '', raw_out)
-        m = re.search(r'\{[\s\S]*\}', raw_out)
-        if not m:
-            log_signal.emit(f"⚠️ [Gemini CLI] Không parse được JSON phản hồi: {raw_out[:150]}")
-            return None
-        return json.loads(m.group(0))
+        return _parse_ai_json_response(stdout)
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
         except Exception:
             pass
-        log_signal.emit("⚠️ [Gemini CLI] Quá thời gian chờ phản hồi (timeout 35s).")
+        log_signal.emit(f"⚠️ [Gemini CLI] Quá thời gian chờ phản hồi ({timeout_sec}s).")
         return None
     except Exception as e:
-        log_signal.emit(f"⚠️ [Gemini CLI] Lỗi thực thi: {str(e)[:120]}")
+        log_signal.emit(f"⚠️ [AI Fallback] Lỗi thực thi: {str(e)[:120]}")
         return None
 
 
@@ -4235,14 +4299,15 @@ class MainWindow(QWidget):
 
     def save_settings_from_gui(self, *args):
         try:
-            cfg = {
+            cfg = load_gui_config()
+            cfg.update({
                 "acc_input": clean_account_string(self.acc_input.text().strip()),
                 "recovery_email": self.recovery_combo.currentText().strip(),
                 "gpm_profile": self.gpm_profile_input.text().strip(),
                 "gpm_api": self.gpm_api_input.text().strip(),
                 "cb_change_nickname": self.cb_change_nickname.isChecked(),
                 "cb_change_avatar": self.cb_change_avatar.isChecked()
-            }
+            })
             save_gui_config(cfg)
         except Exception:
             pass
@@ -6047,32 +6112,89 @@ class MainWindow(QWidget):
             self.btn_update.setEnabled(True)
 
     def open_gemini_cli_login(self):
-        """Kiểm tra trạng thái Gemini CLI và mở cửa sổ CMD để đăng nhập tài khoản Google."""
+        """Hiển thị cấu hình AI Fallback (Antigravity CLI agy.exe tự động hoặc nhập Gemini API Key)."""
         installed, logged_in, detail = check_gemini_cli_auth_status()
         rules_count = len(load_gemini_learned_rules())
-        if not installed:
-            self.log_output.append("⚠️ Chưa cài Gemini CLI! Mở CMD chạy lệnh: npm install -g @google/gemini-cli")
-            return
+        current_key = get_saved_gemini_api_key()
+        agy_bin = find_agy_cli_executable()
 
-        if logged_in:
-            self.log_output.append(f"✅ [Gemini CLI] {detail} | Số luật HTML đã tự học: {rules_count}")
-            reply = QMessageBox.question(
-                self,
-                "Gemini CLI đã sẵn sàng",
-                f"Trạng thái: {detail}\nSố luật HTML đã học: {rules_count}\n\nBạn có muốn mở cửa sổ Gemini CLI (CMD) để kiểm tra hoặc đổi tài khoản không?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply != QMessageBox.StandardButton.Yes:
+        self.log_output.append(f"🤖 [AI Fallback] {detail} | Số luật HTML đã tự học: {rules_count}")
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Cấu hình AI Bộ Não Dự Phòng (Antigravity / Gemini)")
+        dlg.setMinimumWidth(520)
+        dlg.setStyleSheet("""
+            QDialog { background-color: #1e1e1e; color: #ffffff; }
+            QLabel { color: #e0e0e0; font-size: 10pt; }
+            QLineEdit { background-color: #2d2d2d; color: #fff; border: 1px solid #555; padding: 7px; border-radius: 4px; }
+        """)
+        lay = QVBoxLayout(dlg)
+
+        status_color = "#81c784" if logged_in else "#ffb74d"
+        lbl_status = QLabel(
+            f"<b style='color:{status_color};'>Trạng thái: {detail}</b><br>"
+            f"📚 Số luật HTML mới đã tự học: <b>{rules_count}</b><br><br>"
+            "• <b>Chế độ 1 (Tự động - Miễn phí):</b> Dùng thẳng <b>Antigravity CLI (agy.exe)</b> đã đăng nhập sẵn trên máy bạn (không cần đăng nhập Gemini CLI cũ nữa vì Google đã chuyển cá nhân sang Antigravity).<br>"
+            "• <b>Chế độ 2 (Tùy chọn - Siêu tốc ~1s / chạy VPS):</b> Dán <b>Gemini API Key</b> miễn phí từ <i>aistudio.google.com/apikey</i> vào ô dưới đây:"
+        )
+        lbl_status.setWordWrap(True)
+        lay.addWidget(lbl_status)
+
+        key_input = QLineEdit(current_key)
+        key_input.setPlaceholderText("AIzaSy... (Để trống sẽ tự động dùng Antigravity CLI agy.exe)")
+        lay.addWidget(key_input)
+
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("💾 Lưu Cấu Hình")
+        btn_save.setStyleSheet("padding: 8px 14px; background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;")
+
+        btn_test = QPushButton("⚡ Test AI Ngay")
+        btn_test.setStyleSheet("padding: 8px 14px; background-color: #0288d1; color: white; font-weight: bold; border-radius: 4px;")
+
+        btn_open_agy = QPushButton("🖥️ Mở AGY CLI")
+        btn_open_agy.setStyleSheet("padding: 8px 14px; background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px;")
+
+        def _save():
+            cfg = load_gui_config()
+            cfg["gemini_api_key"] = key_input.text().strip()
+            save_gui_config(cfg)
+            _, _, new_detail = check_gemini_cli_auth_status()
+            self.log_output.append(f"💾 [AI Fallback] Đã lưu cấu hình! ({new_detail})")
+            dlg.accept()
+
+        def _test():
+            cfg = load_gui_config()
+            cfg["gemini_api_key"] = key_input.text().strip()
+            save_gui_config(cfg)
+            self.log_output.append("🧪 [AI Fallback] Đang gửi thử 1 DOM giả lập để kiểm tra phản hồi AI...")
+            def _run_test():
+                class _Sig:
+                    def __init__(self, fn): self.emit = fn
+                dummy_dom = {"url": "https://account.live.com/Consent", "title": "Let this app access your info?", "visible_text": "Accept permissions", "elements": [{"tag": "button", "selector": "button[data-testid=\"appConsentPrimaryButton\"]", "text": "Accept"}]}
+                res = call_gemini_cli_sync("Test kết nối AI", dummy_dom, _Sig(self.background_log_signal.emit))
+                if res:
+                    self.background_log_signal.emit(f"✅ [Test AI THÀNH CÔNG] Phản hồi: {json.dumps(res, ensure_ascii=False)}")
+                else:
+                    self.background_log_signal.emit("❌ [Test AI] Không nhận được phản hồi hợp lệ.")
+            threading.Thread(target=_run_test, daemon=True).start()
+            dlg.accept()
+
+        def _open_cli():
+            target_cli = agy_bin or find_gemini_cli_executable()
+            if not target_cli:
+                self.log_output.append("⚠️ Không tìm thấy agy.exe hoặc gemini trên máy.")
                 return
-        else:
-            self.log_output.append(f"⚠️ [Gemini CLI] {detail} -> Đang mở cửa sổ đăng nhập Google...")
+            subprocess.Popen(f'start "Antigravity CLI" cmd /k "{target_cli}"', shell=True)
 
-        gemini_bin = find_gemini_cli_executable()
-        try:
-            subprocess.Popen(f'start "Gemini CLI Login" cmd /k "{gemini_bin}"', shell=True)
-            self.log_output.append("🚀 Đã mở cửa sổ Gemini CLI -> Hãy chọn 'Login with Google' trên cửa sổ đó để đăng nhập xong là dùng được!")
-        except Exception as e:
-            self.log_output.append(f"❌ Không thể mở Gemini CLI: {str(e)}")
+        btn_save.clicked.connect(_save)
+        btn_test.clicked.connect(_test)
+        btn_open_agy.clicked.connect(_open_cli)
+
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_test)
+        btn_row.addWidget(btn_open_agy)
+        lay.addLayout(btn_row)
+        dlg.exec()
 
 def main():
     # Tự động kiểm tra bản cập nhật mới từ GitHub mỗi lần khởi động tool
