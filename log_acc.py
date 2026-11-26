@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -5278,31 +5278,52 @@ class MainWindow(QWidget):
 
         threading.Thread(target=update_thread, daemon=True).start()
 
+    def _get_expressvpn_us_slugs(self, cmd_path):
+        """Lấy danh sách toàn bộ server US từ ExpressVPN để xoay IP sạch khi dính Maximum attempts."""
+        fallback_us = [
+            "usa-denver", "usa-seattle", "usa-atlanta", "usa-boston", "usa-houston",
+            "usa-phoenix", "usa-salt-lake-city", "usa-las-vegas", "usa-portland-oregon",
+            "usa-minneapolis", "usa-philadelphia", "usa-charlotte", "usa-nashville",
+            "usa-tampa-1", "usa-washington-dc", "usa-detroit", "usa-indianapolis",
+            "usa-new-york", "usa-los-angeles-1", "usa-san-francisco", "usa-miami",
+            "usa-chicago", "usa-dallas",
+        ]
+        try:
+            reg_res = subprocess.run(f'{cmd_path} get regions', shell=True, capture_output=True, text=True, timeout=8)
+            dynamic_us = [
+                ln.strip() for ln in (reg_res.stdout or "").splitlines()
+                if ln.strip().startswith("usa-")
+            ]
+            if dynamic_us:
+                random.shuffle(dynamic_us)
+                return dynamic_us
+        except Exception:
+            pass
+        random.shuffle(fallback_us)
+        return fallback_us
+
     def connect_vpn_us_background(self, profile_name, api_url, account_password=None, login_mode="qrcode", tiktok_email=None, oauth_recovery_str=None):
-        """Đổi VPN sang US; chỉ khi thành công mới mở đúng profile GPM."""
+        """Đổi VPN sang US; nếu đăng nhập TikTok bị Maximum number -> tự tắt Chrome, đổi VPN US khác và chạy lại."""
         self.log_output.append("🌐 [VPN] Bắt đầu tiến trình đổi IP sang US qua ExpressVPN...")
         
         def run_vpn():
             try:
                 cmd_path = r'cd /d "C:\Program Files\ExpressVPN" && .\expressvpnctl'
-                
-                # Danh sách server US mặc định hoặc đọc từ file countries.txt
-                us_slugs = ["usa-new-york", "usa-los-angeles-1", "usa-san-francisco", "usa-miami", "usa-chicago", "usa-dallas"]
-                random.shuffle(us_slugs)
-                
-                # Thử kết nối lần lượt
-                for attempt in range(min(len(us_slugs), 3)):
+                us_slugs = self._get_expressvpn_us_slugs(cmd_path)
+                max_vpn_rotations = 5
+                vpn_rotations = 0
+                conn_failures = 0
+
+                for server_slug in us_slugs:
                     if self.wait_if_paused_or_stopped():
                         return
-                    server_slug = us_slugs[attempt]
-                    self.background_log_signal.emit(f"🌐 [Lần {attempt+1}] Đang kết nối ExpressVPN tới: {server_slug.upper()}...")
+                    self.background_log_signal.emit(f"🌐 [VPN US] Đang kết nối ExpressVPN tới: {server_slug.upper()}...")
                     
                     subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
                     if self.wait_if_paused_or_stopped(1.5):
                         return
                     subprocess.run(f'{cmd_path} connect "{server_slug}"', shell=True, capture_output=True)
                     
-                    # Kiểm tra trạng thái trong 8 giây
                     is_connected = False
                     for _ in range(4):
                         if self.wait_if_paused_or_stopped(2):
@@ -5313,22 +5334,39 @@ class MainWindow(QWidget):
                             is_connected = True
                             break
                     
-                    if is_connected:
-                        if self.wait_if_paused_or_stopped():
+                    if not is_connected:
+                        conn_failures += 1
+                        self.background_log_signal.emit(f"⚠️ [VPN] Server {server_slug} phản hồi chậm, đang thử cụm US khác...")
+                        if conn_failures >= 4 and vpn_rotations == 0:
+                            self.background_log_signal.emit("❌ [VPN] Không thể kết nối tới các cụm IP US; không mở GPM.")
                             return
-                        self.background_log_signal.emit(f"🌍 [Bước 2] VPN đã kết nối US ({server_slug.upper()}) thành công!")
-                        self.open_gpm_profile_and_tiktok(
-                            profile_name, api_url,
-                            account_password=account_password,
-                            login_mode=login_mode,
-                            tiktok_email=tiktok_email,
-                            oauth_recovery_str=oauth_recovery_str
-                        )
+                        continue
+
+                    conn_failures = 0
+                    if self.wait_if_paused_or_stopped():
                         return
-                    else:
-                        self.background_log_signal.emit(f"⚠️ [VPN] Server {server_slug} phản hồi chậm, đang thử cụm khác...")
-                 
-                self.background_log_signal.emit("❌ [VPN] Không thể kết nối tới các cụm IP US; không mở GPM.")
+                    self.background_log_signal.emit(f"🌍 [Bước 2] VPN đã kết nối US ({server_slug.upper()}) thành công!")
+                    gpm_res = self.open_gpm_profile_and_tiktok(
+                        profile_name, api_url,
+                        account_password=account_password,
+                        login_mode=login_mode,
+                        tiktok_email=tiktok_email,
+                        oauth_recovery_str=oauth_recovery_str
+                    )
+                    if gpm_res == "retry_vpn":
+                        vpn_rotations += 1
+                        if vpn_rotations >= max_vpn_rotations:
+                            self.background_log_signal.emit(
+                                f"🛑 [VPN US] Đã thử đổi {max_vpn_rotations} cụm IP US liên tiếp nhưng TikTok vẫn báo 'Maximum number' -> Tạm dừng nick này để an toàn!"
+                            )
+                            return
+                        self.background_log_signal.emit(
+                            f"🔄 [Xoay IP US {vpn_rotations}/{max_vpn_rotations}] Đã tắt Chrome GPM -> Đang đổi sang cụm ExpressVPN US mới để đăng nhập lại..."
+                        )
+                        if self.wait_if_paused_or_stopped(2):
+                            return
+                        continue
+                    return
             except Exception as e:
                 self.background_log_signal.emit(f"❌ [VPN] Lỗi thực thi ExpressVPN: {str(e)}")
             finally:
@@ -5480,6 +5518,10 @@ class MainWindow(QWidget):
                         target_tab.wait_for_timeout(800)
                         break
 
+                if self._is_tiktok_max_attempts(target_tab):
+                    self.background_log_signal.emit("⚠️ [TikTok Rate-Limit] Trang đăng nhập báo 'Maximum number of attempts' -> Tắt Chrome & đổi VPN US khác!")
+                    return "retry_vpn"
+
                 if target_tab.locator(email_sel).count() > 0 and target_tab.locator(pass_sel).count() > 0:
                     form_ready = True
                     break
@@ -5522,6 +5564,49 @@ class MainWindow(QWidget):
         self.background_log_signal.emit("🚀 [TikTok Email] Đã bấm Log in -> Đang theo dõi OTP / Captcha / Trạng thái đăng nhập...")
         return "submitted"
 
+    def _is_tiktok_max_attempts(self, target_tab, extra_text=""):
+        """Kiểm tra nhanh lỗi 'Maximum number of attempts reached' / 'Too many attempts' trên trang TikTok."""
+        keywords = ("maximum number", "too many attempts", "số lần thử tối đa", "quá nhiều lần thử", "quá số lần")
+        low_extra = (extra_text or "").lower()
+        if any(k in low_extra for k in keywords):
+            return low_extra[:120]
+        try:
+            hit = target_tab.evaluate('''() => {
+                const kws = ['maximum number', 'too many attempts', 'số lần thử tối đa', 'quá nhiều lần thử'];
+                const nodes = document.querySelectorAll('div[type="error"], [data-e2e="login-error"], [role="alert"], [class*="Toast" i], [class*="Error" i]');
+                for (const el of nodes) {
+                    const t = (el.innerText || '').trim();
+                    const tl = t.toLowerCase();
+                    if (kws.some(k => tl.includes(k))) return t;
+                }
+                const bodyTxt = (document.body ? document.body.innerText : '').toLowerCase();
+                for (const k of kws) {
+                    if (bodyTxt.includes(k)) return k;
+                }
+                return '';
+            }''')
+            return hit or ""
+        except Exception:
+            return ""
+
+    def _close_gpm_for_vpn_retry(self, browser, target, api_url):
+        """Đóng sạch trình duyệt GPM Chrome để chuẩn bị đổi sang cụm VPN US mới."""
+        self.background_log_signal.emit("🛑 [GPM] Đang tắt trình duyệt Chrome để đổi sang cụm VPN US khác...")
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        if target and target.get("id"):
+            try:
+                base_api = api_url.rstrip('/')
+                requests.get(f"{base_api}/profiles/close/{target['id']}", timeout=5)
+                requests.get(f"{base_api}/api/v3/profiles/close/{target['id']}", timeout=5)
+            except Exception:
+                pass
+        self.active_gpm_profile = None
+        self.wait_if_paused_or_stopped(2.5)
+
     def _login_tiktok_email_otp_on_tab(self, target_tab, tiktok_email, tiktok_pass, oauth_recovery_str):
         """Đăng nhập TikTok trên GPM bằng Email + MK + OTP Hotmail (kèm AI chẩn đoán lỗi)."""
         class _LogSig:
@@ -5534,6 +5619,8 @@ class MainWindow(QWidget):
             return None
         if sub_state == "already_logged_in":
             return True
+        if sub_state == "retry_vpn":
+            return "retry_vpn"
         if sub_state != "submitted":
             return False
 
@@ -5560,6 +5647,12 @@ class MainWindow(QWidget):
                 if logged_in_dom and "/login" not in curr_url:
                     self.background_log_signal.emit(f"🎉 [TikTok Email] ĐÃ ĐĂNG NHẬP THÀNH CÔNG (sau {step_sec}s)! URL: {target_tab.url}")
                     return True
+
+                # 0. Kiểm tra ngay nếu dính 'Maximum number of attempts reached' -> báo tắt Chrome đổi VPN US khác!
+                max_hit = self._is_tiktok_max_attempts(target_tab)
+                if max_hit:
+                    self.background_log_signal.emit(f"⚠️ [TikTok Rate-Limit] Phát hiện '{max_hit}' -> Sẽ tắt Chrome và đổi sang VPN US khác ngay!")
+                    return "retry_vpn"
 
                 # 1. Phát hiện Captcha -> báo rõ lên Log để người dùng kéo/giải tay trên GPM, KHÔNG tự giải/bypass
                 has_captcha = target_tab.evaluate('''() => {
@@ -5603,6 +5696,12 @@ class MainWindow(QWidget):
                             if send_btn.is_enabled():
                                 send_btn.click(timeout=2000, force=True)
                                 self.background_log_signal.emit("📲 [TikTok OTP] Đã bấm nút gửi mã xác minh về Hotmail!")
+                                if self.wait_if_paused_or_stopped(1.5):
+                                    return None
+                                max_otp_hit = self._is_tiktok_max_attempts(target_tab)
+                                if max_otp_hit:
+                                    self.background_log_signal.emit(f"⚠️ [TikTok Rate-Limit] Bị chặn gửi OTP ('{max_otp_hit}') -> Tắt Chrome & đổi sang VPN US khác!")
+                                    return "retry_vpn"
                         except Exception:
                             pass
                         send_code_clicked = True
@@ -5639,6 +5738,10 @@ class MainWindow(QWidget):
                     }
                     return "";
                 }''')
+                if err_txt and self._is_tiktok_max_attempts(target_tab, extra_text=err_txt):
+                    self.background_log_signal.emit(f"⚠️ [TikTok Rate-Limit] Phát hiện '{err_txt}' -> Tắt Chrome & đổi sang VPN US khác!")
+                    return "retry_vpn"
+
                 idle_sec += 1
                 if (err_txt or idle_sec >= 14) and ai_calls < 2:
                     ai_calls += 1
@@ -5647,6 +5750,10 @@ class MainWindow(QWidget):
                         self.background_log_signal.emit(f"⚠️ [TikTok Cảnh báo trên web]: {err_txt}")
                     self.background_log_signal.emit("🤖 [AI Chẩn đoán] Đang gọi Antigravity CLI (agy.exe) phân tích nguyên nhân trên màn hình TikTok...")
                     ai_res = diagnose_and_assist_tiktok_sync(target_tab, "Đăng nhập Email+MK+OTP", sig)
+                    diag_str = (ai_res or {}).get("diagnosis", "")
+                    if self._is_tiktok_max_attempts(target_tab, extra_text=f"{err_txt} {diag_str}"):
+                        self.background_log_signal.emit("🔄 [AI Chẩn đoán] Xác định dính giới hạn 'Maximum number of attempts' -> Tắt Chrome & đổi VPN US khác!")
+                        return "retry_vpn"
                     if ai_res and ai_res.get("action") == "error":
                         self.background_log_signal.emit("🛑 [AI Kết luận] Tài khoản/mật khẩu hoặc giới hạn phiên gặp lỗi -> Dừng tự động để bạn kiểm tra.")
                         return False
@@ -5902,11 +6009,14 @@ class MainWindow(QWidget):
                                 target_tab, tiktok_email, account_password, oauth_recovery_str
                             )
                             if login_ok is None:
-                                return
+                                return None
+                            if login_ok == "retry_vpn":
+                                self._close_gpm_for_vpn_retry(browser, target, api_url)
+                                return "retry_vpn"
                             self._finish_tiktok_post_login(
                                 target_tab, browser, target, api_url, bool(login_ok), auto_advance=True
                             )
-                            return
+                            return "done"
 
                         # 4. MỞ TRỰC TIẾP TRANG QR CODE CỦA TIKTOK KHI ĐÃ CÀI ĐẶT TẮT TIẾNG TỪ ĐẦU
                         self.background_log_signal.emit("🔇 [TikTok] Đã kích hoạt chế độ Tắt tiếng (Mute) ngay từ đầu. Đang nạp trực tiếp https://www.tiktok.com/login/qrcode...")
@@ -5941,6 +6051,11 @@ class MainWindow(QWidget):
                                 target_tab.keyboard.press("m")
                             except Exception:
                                 pass
+
+                            if self._is_tiktok_max_attempts(target_tab):
+                                self.background_log_signal.emit("⚠️ [TikTok Rate-Limit] Phát hiện 'Maximum number of attempts' khi mở QR -> Tắt Chrome & đổi sang VPN US khác!")
+                                self._close_gpm_for_vpn_retry(browser, target, api_url)
+                                return "retry_vpn"
 
                             # Kiểm tra xem mã QR hoặc nút bấm đã xuất hiện chưa
                             try:
@@ -6011,6 +6126,11 @@ class MainWindow(QWidget):
                                     return
                                 dismiss_tiktok_popups(target_tab, self.background_log_signal)
                                 try:
+                                    if self._is_tiktok_max_attempts(target_tab):
+                                        self.background_log_signal.emit("⚠️ [TikTok Rate-Limit] Bị dính 'Maximum number of attempts' khi xác minh QR -> Tắt Chrome & đổi sang VPN US khác!")
+                                        self._close_gpm_for_vpn_retry(browser, target, api_url)
+                                        return "retry_vpn"
+
                                     # 1. Kiểm tra URL hoặc avatar đã đăng nhập thành công chưa
                                     curr_url = target_tab.url.lower()
                                     if "tiktok.com" in curr_url and "/login" not in curr_url and ("/@" in curr_url or "foryou" in curr_url or curr_url.rstrip("/").endswith("tiktok.com")):
