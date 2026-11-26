@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -2674,6 +2674,10 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
                     final_result = f"{base_str}|{refresh_token}|{CLIENT_ID}"
                     log_signal.emit(f"💾 LẤY THÀNH CÔNG:")
                     result_signal.emit(final_result)
+
+                    if close_after_oauth:
+                        log_signal.emit("⚡ [Auto A→Z] Đã lưu OAuth2 thành công -> Tự động đóng Chrome phụ để chuyển sang mở GPM...")
+                        return
                     
                     log_signal.emit(f"🌐 Đang mở Outlook.com để load giao diện hộp thư...")
                     try:
@@ -2696,7 +2700,7 @@ async def _run_single_account_session(raw_input_str, email, password, recovery_l
             log_signal.emit(f"⚠️ Lỗi trong trình duyệt: {str(e)[:50]}")
 
 
-async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event, recovery_changed_signal=None, worker=None):
+async def process_single_account(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event, recovery_changed_signal=None, worker=None, close_after_oauth=False):
     await pause_event.wait()
     if isinstance(recovery_list, str):
         current_recovery_list = [recovery_list] if recovery_list.strip() else []
@@ -2719,7 +2723,7 @@ async def process_single_account(raw_input_str, email, password, recovery_list, 
             await asyncio.sleep(2)
 
         try:
-            await _run_single_account_session(raw_input_str, email, password, current_recovery_list, log_signal, result_signal, pause_event)
+            await _run_single_account_session(raw_input_str, email, password, current_recovery_list, log_signal, result_signal, pause_event, close_after_oauth=close_after_oauth)
             return
         except MicrosoftSessionResetException as ms_err:
             if worker and getattr(worker, "_is_stopped", False):
@@ -2753,9 +2757,10 @@ class AutomationWorker(QThread):
     finished_signal = pyqtSignal()
     recovery_changed_signal = pyqtSignal(str)
 
-    def __init__(self, target_acc, recovery_list):
+    def __init__(self, target_acc, recovery_list, close_after_oauth=False):
         super().__init__()
         self.target_acc = target_acc
+        self.close_after_oauth = close_after_oauth
         if isinstance(recovery_list, list):
             self.recovery_list = recovery_list
         elif recovery_list:
@@ -2796,7 +2801,8 @@ class AutomationWorker(QThread):
                 self.target_acc, email, password, self.recovery_list, 
                 self.log_signal, self.result_signal, self.pause_event,
                 recovery_changed_signal=self.recovery_changed_signal,
-                worker=self
+                worker=self,
+                close_after_oauth=self.close_after_oauth
             ))
         except asyncio.CancelledError:
             pass
@@ -3866,6 +3872,7 @@ class MainWindow(QWidget):
     vpn_gpm_finished_signal = pyqtSignal()
     gpm_api_detected_signal = pyqtSignal(str)
     otp_received_signal = pyqtSignal(str)
+    auto_advance_next_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -3874,6 +3881,8 @@ class MainWindow(QWidget):
         self.otp_running = False
         self.tiktok_update_running = False
         self._auto_gpm_after_otp = False
+        self._pending_auto_az_gpm = False
+        self._auto_advance_after_profile_update = False
         self.active_gpm_profile = None
         self.global_stop_event = threading.Event()
         self.global_pause_event = threading.Event()
@@ -3883,6 +3892,7 @@ class MainWindow(QWidget):
         self.vpn_gpm_finished_signal.connect(self.on_vpn_gpm_finished)
         self.gpm_api_detected_signal.connect(self.on_gpm_api_detected)
         self.otp_received_signal.connect(self.on_otp_received)
+        self.auto_advance_next_signal.connect(self._on_auto_advance_next)
         self.initUI()
 
         # Tự động quét API / khởi động GPM & giải License sau 1.2s khi mở app
@@ -3936,7 +3946,7 @@ class MainWindow(QWidget):
     def initUI(self):
         self.setWindowTitle(f'Get OAuth2 Token & Outlook Loader - Hao Automation (v{APP_VERSION})')
         self.setFixedWidth(750)
-        self.setFixedHeight(770)
+        self.setFixedHeight(815)
         self.setStyleSheet("""
             QWidget {
                 background-color: #121212;
@@ -4158,6 +4168,25 @@ class MainWindow(QWidget):
         row2.addWidget(self.btn_play_vpn_gpm, stretch=1)
         row2.addWidget(self.btn_change_name_avatar, stretch=1)
         main_layout.addLayout(row2)
+
+        # --- DÒNG MỚI RIÊNG BIỆT: CHẾ ĐỘ ĐĂNG NHẬP GPM BẰNG EMAIL + MK + OTP HOTMAIL & AUTO A->Z ---
+        row_auto = QHBoxLayout()
+
+        self.btn_auto_az = QPushButton("⚡ AUTO A→Z (Lấy OAuth2 → GPM Email+OTP)")
+        self.btn_auto_az.setStyleSheet("padding: 10px; background-color: #00897b; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_auto_az.setToolTip("Bước 1: Lấy OAuth2 Hotmail & đóng Chrome phụ -> Bước 2: Bật VPN US + Mở GPM -> Bước 3: Điền Email + MK + OTP Hotmail vào TikTok & Chẩn đoán AI")
+        self.btn_auto_az.clicked.connect(self.start_auto_az_process)
+        self.btn_auto_az.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.btn_gpm_email_login = QPushButton("🔑 Login GPM (Email + MK + OTP)")
+        self.btn_gpm_email_login.setStyleSheet("padding: 10px; background-color: #3949ab; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_gpm_email_login.setToolTip("Dành cho nick đã có OAuth2: Bật VPN US -> Mở GPM Chrome -> Vào TikTok điền Email + MK + tự lấy OTP Hotmail + AI báo lỗi")
+        self.btn_gpm_email_login.clicked.connect(self.start_gpm_email_otp_only)
+        self.btn_gpm_email_login.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        row_auto.addWidget(self.btn_auto_az, stretch=1)
+        row_auto.addWidget(self.btn_gpm_email_login, stretch=1)
+        main_layout.addLayout(row_auto)
 
         # --- 3. DÒNG 3: PLAY + TẠM DỪNG + STOP + XÓA LOG + CẬP NHẬT ---
         row3 = QHBoxLayout()
@@ -5228,7 +5257,12 @@ class MainWindow(QWidget):
                             self.background_log_signal.emit("✅ [VPN] Đã tự động ngắt kết nối ExpressVPN thành công!")
                         except Exception as vpn_err:
                             self.background_log_signal.emit(f"⚠️ [VPN] Không thể ngắt kết nối ExpressVPN: {vpn_err}")
+
+                        if self._auto_advance_after_profile_update:
+                            self._auto_advance_after_profile_update = False
+                            self.auto_advance_next_signal.emit()
                     else:
+                        self._auto_advance_after_profile_update = False
                         error_reasons = []
                         if chosen_avatar and not avatar_success:
                             error_reasons.append("Chưa đổi được Avatar")
@@ -5239,11 +5273,12 @@ class MainWindow(QWidget):
                         self.background_log_signal.emit("⚠️ [TikTok] GIỮ NGUYÊN TRÌNH DUYỆT CHROME để bạn kiểm tra, KHÔNG đóng Chrome!")
 
             except Exception as ex:
+                self._auto_advance_after_profile_update = False
                 self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi quy trình cập nhật hồ sơ: {str(ex)}")
 
         threading.Thread(target=update_thread, daemon=True).start()
 
-    def connect_vpn_us_background(self, profile_name, api_url, account_password=None):
+    def connect_vpn_us_background(self, profile_name, api_url, account_password=None, login_mode="qrcode", tiktok_email=None, oauth_recovery_str=None):
         """Đổi VPN sang US; chỉ khi thành công mới mở đúng profile GPM."""
         self.log_output.append("🌐 [VPN] Bắt đầu tiến trình đổi IP sang US qua ExpressVPN...")
         
@@ -5282,7 +5317,13 @@ class MainWindow(QWidget):
                         if self.wait_if_paused_or_stopped():
                             return
                         self.background_log_signal.emit(f"🌍 [Bước 2] VPN đã kết nối US ({server_slug.upper()}) thành công!")
-                        self.open_gpm_profile_and_tiktok(profile_name, api_url, account_password=account_password)
+                        self.open_gpm_profile_and_tiktok(
+                            profile_name, api_url,
+                            account_password=account_password,
+                            login_mode=login_mode,
+                            tiktok_email=tiktok_email,
+                            oauth_recovery_str=oauth_recovery_str
+                        )
                         return
                     else:
                         self.background_log_signal.emit(f"⚠️ [VPN] Server {server_slug} phản hồi chậm, đang thử cụm khác...")
@@ -5297,10 +5338,331 @@ class MainWindow(QWidget):
         import threading
         threading.Thread(target=run_vpn, daemon=True).start()
 
-    def open_gpm_profile_and_tiktok(self, profile_name, api_url, account_password=None):
+    def _on_auto_advance_next(self):
+        """Tự động chuyển sang tài khoản tiếp theo & profile GPM tiếp theo khi đăng nhập thành công."""
+        if self.global_stop_event.is_set():
+            return
+        self.advance_target_account()
+        self.advance_gpm_profile()
+
+    def _finish_tiktok_post_login(self, target_tab, browser, target, api_url, already_logged_in, auto_advance=False):
+        """Xử lý sau khi đăng nhập TikTok: tắt tiếng, đổi Tên/Avatar (nếu tích) hoặc đóng GPM + tắt VPN + sang nick mới."""
+        try:
+            target_tab.evaluate("window.__mute_tiktok && window.__mute_tiktok()")
+            target_tab.keyboard.press("m")
+        except Exception:
+            pass
+        self.background_log_signal.emit("🔇 [TikTok] Đã tắt tiếng hoàn toàn (Mute site).")
+
+        if already_logged_in:
+            do_nick = self.cb_change_nickname.isChecked()
+            do_avatar = self.cb_change_avatar.isChecked()
+            if do_nick or do_avatar:
+                self._auto_advance_after_profile_update = bool(auto_advance)
+                self.background_log_signal.emit("🚀 [Tự động] Đã đăng nhập TikTok thành công -> Tự động chuyển sang Đổi Tên Nick & Avatar sau 2s...")
+                if self.wait_if_paused_or_stopped(2):
+                    return
+                self.trigger_change_name_avatar()
+            else:
+                self.background_log_signal.emit("ℹ️ [TikTok] Đã đăng nhập TikTok thành công (Tùy chọn Đổi tên/Avatar đang tắt).")
+                self.background_log_signal.emit("🛑 [TikTok] Đang đóng trình duyệt Chrome GPM...")
+                try:
+                    browser.close()
+                    self.background_log_signal.emit("🛑 [TikTok] Đã đóng Chrome thành công!")
+                except Exception as close_err:
+                    self.background_log_signal.emit(f"⚠️ [TikTok] Lỗi khi đóng Chrome: {close_err}")
+
+                if target and target.get("id"):
+                    try:
+                        base_api = api_url.rstrip('/')
+                        requests.get(f"{base_api}/profiles/close/{target['id']}", timeout=5)
+                        requests.get(f"{base_api}/api/v3/profiles/close/{target['id']}", timeout=5)
+                    except Exception:
+                        pass
+
+                self.background_log_signal.emit("🌐 [VPN] Đang tự động ngắt kết nối ExpressVPN...")
+                try:
+                    cmd_path = r'cd /d "C:\Program Files\ExpressVPN" && .\expressvpnctl'
+                    subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
+                    self.background_log_signal.emit("✅ [VPN] Đã tự động ngắt kết nối ExpressVPN thành công!")
+                except Exception as vpn_err:
+                    self.background_log_signal.emit(f"⚠️ [VPN] Không thể ngắt kết nối ExpressVPN: {vpn_err}")
+
+                self.background_log_signal.emit("🎉 [Hoàn tất] Đã hoàn thành đăng nhập TikTok thành công!")
+                if auto_advance:
+                    self.auto_advance_next_signal.emit()
+        else:
+            self.background_log_signal.emit("⚠️ [TikTok] Chưa hoàn tất đăng nhập tự động -> Giữ nguyên cửa sổ GPM Chrome để bạn kiểm tra.")
+
+    def _fill_tiktok_otp_box(self, target_tab, otp_code):
+        """Điền 6 số OTP vào ô mã xác minh trên TikTok (hỗ trợ cả 1 ô liền hoặc 6 ô rời)."""
+        otp_sel = (
+            'input[placeholder*="6-digit" i], input[placeholder*="code" i], input[placeholder*="mã" i], '
+            'input[autocomplete="one-time-code"], div[class*="code-input" i] input, div[data-e2e*="code" i] input'
+        )
+        loc = target_tab.locator(otp_sel)
+        cnt = loc.count()
+        if cnt >= 6:
+            loc.first.click(force=True, timeout=2000)
+            target_tab.wait_for_timeout(200)
+            target_tab.keyboard.type(str(otp_code), delay=90)
+        elif cnt > 0:
+            inp = loc.first
+            inp.click(force=True, timeout=2000)
+            target_tab.wait_for_timeout(200)
+            inp.fill("")
+            inp.fill(str(otp_code))
+        else:
+            target_tab.keyboard.type(str(otp_code), delay=90)
+
+        target_tab.wait_for_timeout(500)
+        for btn_sel in [
+            'button[data-e2e="login-button"]',
+            'button[type="submit"]',
+            'button:has-text("Log in")',
+            'button:has-text("Next")',
+            'button:has-text("Continue")',
+            'button:has-text("Đăng nhập")',
+            'button:has-text("Tiếp")',
+        ]:
+            try:
+                b = target_tab.locator(btn_sel).first
+                if b.count() > 0 and b.is_visible(timeout=300) and b.is_enabled():
+                    b.click(timeout=2000, force=True)
+                    return
+            except Exception:
+                pass
+        try:
+            target_tab.keyboard.press("Enter")
+        except Exception:
+            pass
+
+    def _submit_tiktok_email_credentials(self, target_tab, tiktok_email, tiktok_pass, sig):
+        """Mở form đăng nhập Email của TikTok, điền Email + Mật khẩu và bấm Log in."""
+        login_url = "https://www.tiktok.com/login/phone-or-email/email"
+        self.background_log_signal.emit(f"🌐 [TikTok Email] Đang mở trang đăng nhập Email: {login_url}")
+        try:
+            target_tab.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as ge:
+            self.background_log_signal.emit(f"⚠️ [TikTok Email] Ghi chú tải URL: {ge}")
+
+        if self.wait_if_paused_or_stopped(3):
+            return None
+        try:
+            target_tab.bring_to_front()
+        except Exception:
+            pass
+        dismiss_tiktok_popups(target_tab, self.background_log_signal)
+
+        email_sel = 'input[name="username"], input[placeholder*="Email" i], input[type="email"], input[autocomplete="username"]'
+        pass_sel = 'input[type="password"], input[placeholder*="Password" i], input[placeholder*="Mật khẩu" i]'
+
+        form_ready = False
+        for wait_s in range(1, 22):
+            if self.wait_if_paused_or_stopped():
+                return None
+            dismiss_tiktok_popups(target_tab, self.background_log_signal)
+            try:
+                if target_tab.locator('a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"]').count() > 0:
+                    self.background_log_signal.emit("ℹ️ [TikTok] Tài khoản đã đăng nhập sẵn trên profile GPM này!")
+                    return "already_logged_in"
+
+                # Nếu TikTok nhảy về tab Phone hoặc danh sách kênh login -> tự bấm chuyển sang Email
+                for switch_sel in [
+                    'a[href*="/login/phone-or-email/email"]',
+                    'a:has-text("Log in with email or username")',
+                    'a:has-text("Đăng nhập bằng email")',
+                    '[data-e2e="channel-item"]:has-text("Use phone / email / username")',
+                ]:
+                    sw = target_tab.locator(switch_sel).first
+                    if sw.count() > 0 and sw.is_visible(timeout=200):
+                        sw.click(timeout=1500, force=True)
+                        target_tab.wait_for_timeout(800)
+                        break
+
+                if target_tab.locator(email_sel).count() > 0 and target_tab.locator(pass_sel).count() > 0:
+                    form_ready = True
+                    break
+            except Exception:
+                pass
+            if wait_s == 12:
+                diagnose_and_assist_tiktok_sync(target_tab, "Chờ form điền Email + Mật khẩu", sig)
+            if self.wait_if_paused_or_stopped(1):
+                return None
+
+        if not form_ready:
+            self.background_log_signal.emit("❌ [TikTok Email] Không tìm thấy ô nhập Email/Mật khẩu sau 20s -> Gọi AI phân tích...")
+            diagnose_and_assist_tiktok_sync(target_tab, "Không thấy ô nhập Email+MK", sig)
+            return "failed"
+
+        self.background_log_signal.emit(f"✍️ [TikTok Email] Đang điền Email '{tiktok_email}' và Mật khẩu TikTok...")
+        em_inp = target_tab.locator(email_sel).first
+        pw_inp = target_tab.locator(pass_sel).first
+        em_inp.click(force=True, timeout=2000)
+        em_inp.fill("")
+        em_inp.fill(tiktok_email)
+        target_tab.wait_for_timeout(300)
+        pw_inp.click(force=True, timeout=2000)
+        pw_inp.fill("")
+        pw_inp.fill(tiktok_pass)
+        target_tab.wait_for_timeout(500)
+
+        clicked_login = False
+        for btn_sel in ['button[data-e2e="login-button"]', 'button[type="submit"]', 'button:has-text("Log in")', 'button:has-text("Đăng nhập")']:
+            try:
+                btn = target_tab.locator(btn_sel).first
+                if btn.count() > 0 and btn.is_visible(timeout=300):
+                    btn.click(timeout=2500, force=True)
+                    clicked_login = True
+                    break
+            except Exception:
+                pass
+        if not clicked_login:
+            pw_inp.press("Enter")
+        self.background_log_signal.emit("🚀 [TikTok Email] Đã bấm Log in -> Đang theo dõi OTP / Captcha / Trạng thái đăng nhập...")
+        return "submitted"
+
+    def _login_tiktok_email_otp_on_tab(self, target_tab, tiktok_email, tiktok_pass, oauth_recovery_str):
+        """Đăng nhập TikTok trên GPM bằng Email + MK + OTP Hotmail (kèm AI chẩn đoán lỗi)."""
+        class _LogSig:
+            def __init__(self, emit_fn):
+                self.emit = emit_fn
+        sig = _LogSig(self.background_log_signal.emit)
+
+        sub_state = self._submit_tiktok_email_credentials(target_tab, tiktok_email, tiktok_pass, sig)
+        if sub_state is None:
+            return None
+        if sub_state == "already_logged_in":
+            return True
+        if sub_state != "submitted":
+            return False
+
+        captcha_notified = False
+        send_code_clicked = False
+        otp_filled = False
+        ai_calls = 0
+        idle_sec = 0
+
+        for step_sec in range(1, 96):
+            if self.wait_if_paused_or_stopped(1):
+                return None
+            dismiss_tiktok_popups(target_tab, self.background_log_signal)
+            try:
+                target_tab.evaluate("window.__mute_tiktok && window.__mute_tiktok()")
+            except Exception:
+                pass
+
+            try:
+                curr_url = target_tab.url.lower()
+                logged_in_dom = target_tab.locator(
+                    'a[data-e2e="nav-profile"], div[data-e2e="profile-icon"], img[class*="ImgAvatar"], #header-more-menu-icon'
+                ).count() > 0
+                if logged_in_dom and "/login" not in curr_url:
+                    self.background_log_signal.emit(f"🎉 [TikTok Email] ĐÃ ĐĂNG NHẬP THÀNH CÔNG (sau {step_sec}s)! URL: {target_tab.url}")
+                    return True
+
+                # 1. Phát hiện Captcha -> báo rõ lên Log để người dùng kéo/giải tay trên GPM, KHÔNG tự giải/bypass
+                has_captcha = target_tab.evaluate('''() => {
+                    const sel = '#captcha-verify-image, .captcha_verify_container, .secsdk-captcha-wrapper, [id*="captcha" i], div[class*="captcha_verify" i]';
+                    for (const el of document.querySelectorAll(sel)) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 20 && r.height > 20) return true;
+                    }
+                    const txt = (document.body ? document.body.innerText : '').toLowerCase();
+                    return txt.includes('drag the slider') || txt.includes('fit the puzzle') || txt.includes('select 2 objects') || txt.includes('kéo thanh trượt');
+                }''')
+                if has_captcha:
+                    if not captcha_notified:
+                        self.background_log_signal.emit("🧩 [Captcha TikTok] Phát hiện Captcha trên GPM Chrome — Vui lòng giải tay trên cửa sổ Chrome, tool đang chờ bạn giải xong để tự chạy tiếp!")
+                        captcha_notified = True
+                    idle_sec = 0
+                    continue
+                elif captcha_notified:
+                    self.background_log_signal.emit("✅ [Captcha TikTok] Đã qua màn hình Captcha -> Tiếp tục kiểm tra OTP / Đăng nhập!")
+                    captcha_notified = False
+
+                # 2. Nếu hiện bảng chọn phương thức xác minh ("Verify it's really you") -> chọn Email
+                for email_ch_sel in ['[data-e2e="channel-item"]:has-text("Email")', 'div[role="button"]:has-text("Email")', 'div[role="link"]:has-text("Email")']:
+                    ch = target_tab.locator(email_ch_sel).first
+                    if ch.count() > 0 and ch.is_visible(timeout=200):
+                        ch.click(timeout=1500, force=True)
+                        self.background_log_signal.emit("📲 [TikTok OTP] Đã chọn xác minh qua Email!")
+                        target_tab.wait_for_timeout(1000)
+                        idle_sec = 0
+                        break
+
+                # 3. Kiểm tra màn hình yêu cầu mã OTP 6 số gửi về Hotmail
+                otp_loc = target_tab.locator(
+                    'input[placeholder*="6-digit" i], input[placeholder*="code" i], input[placeholder*="mã" i], '
+                    'input[autocomplete="one-time-code"], div[class*="code-input" i] input'
+                )
+                send_btn = target_tab.locator('button[data-e2e="send-code-button"], button:has-text("Send code"), div[role="button"]:has-text("Send code"), button:has-text("Gửi mã")').first
+                if (otp_loc.count() > 0 or (send_btn.count() > 0 and send_btn.is_visible(timeout=200))) and not otp_filled:
+                    if send_btn.count() > 0 and send_btn.is_visible(timeout=200) and not send_code_clicked:
+                        try:
+                            if send_btn.is_enabled():
+                                send_btn.click(timeout=2000, force=True)
+                                self.background_log_signal.emit("📲 [TikTok OTP] Đã bấm nút gửi mã xác minh về Hotmail!")
+                        except Exception:
+                            pass
+                        send_code_clicked = True
+
+                    if not oauth_recovery_str:
+                        self.background_log_signal.emit("⚠️ [TikTok OTP] TikTok yêu cầu mã xác minh Email nhưng chưa có OAuth2 Hotmail của nick này!")
+                        return False
+
+                    self.background_log_signal.emit("📩 [TikTok OTP] Phát hiện ô nhập 6 số OTP -> Đợi 4s rồi quét OAuth2 hộp thư Hotmail...")
+                    if self.wait_if_paused_or_stopped(4):
+                        return None
+                    otp_code = get_outlook_otp_via_api(
+                        oauth_recovery_str, sig,
+                        stop_event=self.global_stop_event,
+                        pause_event=self.global_pause_event,
+                        prefer_sender="tiktok"
+                    )
+                    if otp_code:
+                        self.background_log_signal.emit(f"🎯 [TikTok OTP] Đã lấy được OTP TikTok: {otp_code} -> Tự động điền vào GPM Chrome!")
+                        self._fill_tiktok_otp_box(target_tab, otp_code)
+                        otp_filled = True
+                        idle_sec = 0
+                        continue
+                    else:
+                        self.background_log_signal.emit("❌ [TikTok OTP] Không tìm thấy mã OTP TikTok mới trong hộp thư Hotmail!")
+                        return False
+
+                # 4. Kiểm tra dòng chữ báo lỗi đỏ trên TikTok hoặc kẹt > 14s -> Gọi AI (agy.exe) chẩn đoán tiếng Việt
+                err_txt = target_tab.evaluate('''() => {
+                    const errs = document.querySelectorAll('div[type="error"], [data-e2e="login-error"], span[class*="Error" i], div[class*="ErrorText" i]');
+                    for (const el of errs) {
+                        const t = (el.innerText || '').trim();
+                        if (t.length > 2) return t;
+                    }
+                    return "";
+                }''')
+                idle_sec += 1
+                if (err_txt or idle_sec >= 14) and ai_calls < 2:
+                    ai_calls += 1
+                    idle_sec = 0
+                    if err_txt:
+                        self.background_log_signal.emit(f"⚠️ [TikTok Cảnh báo trên web]: {err_txt}")
+                    self.background_log_signal.emit("🤖 [AI Chẩn đoán] Đang gọi Antigravity CLI (agy.exe) phân tích nguyên nhân trên màn hình TikTok...")
+                    ai_res = diagnose_and_assist_tiktok_sync(target_tab, "Đăng nhập Email+MK+OTP", sig)
+                    if ai_res and ai_res.get("action") == "error":
+                        self.background_log_signal.emit("🛑 [AI Kết luận] Tài khoản/mật khẩu hoặc giới hạn phiên gặp lỗi -> Dừng tự động để bạn kiểm tra.")
+                        return False
+                    if err_txt and (not ai_res or ai_res.get("action") != "acted"):
+                        return False
+            except Exception:
+                pass
+
+        self.background_log_signal.emit("⚠️ [TikTok Email] Hết 95s chờ đăng nhập Email+OTP -> Gọi AI phân tích trạng thái cuối...")
+        diagnose_and_assist_tiktok_sync(target_tab, "Hết thời gian chờ đăng nhập", sig)
+        return False
+
+    def open_gpm_profile_and_tiktok(self, profile_name, api_url, account_password=None, login_mode="qrcode", tiktok_email=None, oauth_recovery_str=None):
         """Tìm profile theo đúng tên, mở bằng GPM API v3 rồi mở TikTok qua CDP."""
         if not account_password:
-            acc_text = self.acc_input.text().strip() or self.result_output.text().strip()
+            acc_text = self.get_current_raw_account() or self.result_output.text().strip()
             _, account_password, _ = extract_email_and_password(acc_text)
 
         if not is_gpm_running():
@@ -5533,6 +5895,18 @@ class MainWindow(QWidget):
                             target_tab.set_viewport_size({"width": 1280, "height": 800})
                         except Exception:
                             pass
+
+                        # NHÁNH MỚI: CHẾ ĐỘ ĐĂNG NHẬP TIKTOK BẰNG EMAIL + MẬT KHẨU + OTP HOTMAIL (+ AI CHẨN ĐOÁN)
+                        if login_mode == "email_otp":
+                            login_ok = self._login_tiktok_email_otp_on_tab(
+                                target_tab, tiktok_email, account_password, oauth_recovery_str
+                            )
+                            if login_ok is None:
+                                return
+                            self._finish_tiktok_post_login(
+                                target_tab, browser, target, api_url, bool(login_ok), auto_advance=True
+                            )
+                            return
 
                         # 4. MỞ TRỰC TIẾP TRANG QR CODE CỦA TIKTOK KHI ĐÃ CÀI ĐẶT TẮT TIẾNG TỪ ĐẦU
                         self.background_log_signal.emit("🔇 [TikTok] Đã kích hoạt chế độ Tắt tiếng (Mute) ngay từ đầu. Đang nạp trực tiếp https://www.tiktok.com/login/qrcode...")
@@ -5846,6 +6220,78 @@ class MainWindow(QWidget):
     def on_vpn_gpm_finished(self):
         self.vpn_gpm_running = False
         self.btn_play_vpn_gpm.setEnabled(True)
+        self.btn_auto_az.setEnabled(True)
+        self.btn_gpm_email_login.setEnabled(True)
+
+    def _resolve_account_oauth2(self, hotmail_email, raw_acc):
+        """Tìm chuỗi OAuth2 (outh2, client_id) từ ô Kết quả -> results.txt -> chuỗi tài khoản gốc."""
+        candidates = []
+        res_txt = self.result_output.text().strip()
+        if res_txt and (not hotmail_email or hotmail_email.lower() in res_txt.lower()):
+            candidates.append(res_txt)
+        if hotmail_email:
+            saved_res = find_result_by_email(hotmail_email)
+            if saved_res:
+                candidates.append(saved_res)
+        if raw_acc:
+            candidates.append(raw_acc)
+        for cand in candidates:
+            outh2, client_id = parse_oauth2_and_client_id(cand)
+            if outh2 and client_id:
+                return outh2, client_id, cand
+        return None, None, None
+
+    def start_gpm_email_otp_only(self, *args):
+        """Chạy riêng Bước 2->4: VPN US -> Mở GPM Chrome -> Đăng nhập TikTok bằng Email + MK + OTP Hotmail + AI báo lỗi."""
+        profile_name = self.gpm_profile_input.text().strip()
+        api_url = self.gpm_api_input.text().strip()
+        if not profile_name:
+            self.log_output.append("⚠️ Vui lòng nhập tên profile GPM (ví dụ PK-117-1).")
+            return
+        if not api_url or not api_url.startswith(("http://", "https://")):
+            self.log_output.append("⚠️ Vui lòng kiểm tra địa chỉ GPM Local API (http://127.0.0.1:.../api/v3).")
+            return
+        if self.vpn_gpm_running:
+            self.log_output.append("⚠️ Tiến trình VPN + GPM đang chạy!")
+            return
+
+        raw_acc = self.get_current_raw_account()
+        tiktok_user, tiktok_pass, hotmail_email, _ = extract_tiktok_and_hotmail_creds(raw_acc)
+        if not hotmail_email or not tiktok_pass:
+            self.log_output.append("⚠️ Không nhận diện được Email Hotmail hoặc Mật khẩu đăng nhập TikTok từ tài khoản đang chọn!")
+            return
+
+        outh2, client_id, matched_str = self._resolve_account_oauth2(hotmail_email, raw_acc)
+        oauth_recovery_str = f"dummy|dummy|{outh2}|{client_id}" if (outh2 and client_id) else None
+        if matched_str and not self.result_output.text().strip():
+            self.result_output.setText(matched_str)
+
+        if not oauth_recovery_str:
+            self.log_output.append(
+                f"⚠️ Chưa tìm thấy OAuth2 của '{hotmail_email}' (nếu TikTok hỏi OTP sẽ không tự lấy được). "
+                "Mẹo: Bấm '⚡ AUTO A→Z' nếu muốn lấy OAuth2 trước!"
+            )
+
+        self.global_stop_event.clear()
+        self.global_pause_event.set()
+        self.btn_pause.setText("TẠM DỪNG")
+        self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
+        self.vpn_gpm_running = True
+        self.btn_play_vpn_gpm.setEnabled(False)
+        self.btn_auto_az.setEnabled(False)
+        self.btn_gpm_email_login.setEnabled(False)
+
+        self.log_output.append(
+            f"🔑 [Login GPM Email+OTP] Bắt đầu cho: {hotmail_email} (User: {tiktok_user or 'auto'} | MK TikTok: {tiktok_pass}) -> Profile GPM: {profile_name}"
+        )
+        self.connect_vpn_us_background(
+            profile_name,
+            api_url,
+            account_password=tiktok_pass,
+            login_mode="email_otp",
+            tiktok_email=hotmail_email,
+            oauth_recovery_str=oauth_recovery_str
+        )
 
     def copy_link_and_vpn(self):
         """Bước 1 đổi VPN, bước 2 xác nhận, bước 3 mở GPM và TikTok."""
@@ -6005,6 +6451,81 @@ class MainWindow(QWidget):
         self.log_output.append(f"🔁 Profile kế tiếp: {current} → {next_profile}")
 
 
+    def start_auto_az_process(self):
+        """Quy trình liền mạch A->Z: Bước 1 Lấy OAuth2 & đóng Chrome phụ -> Bước 2 VPN US + GPM -> Bước 3 Login TikTok Email+MK+OTP + AI."""
+        target_acc = self.get_current_raw_account()
+        if not target_acc:
+            self.log_output.append("⚠️ Vui lòng chọn tài khoản trước khi chạy AUTO A→Z!")
+            return
+        if not self.gpm_profile_input.text().strip():
+            self.log_output.append("⚠️ Vui lòng nhập tên profile GPM (ví dụ PK-117-1) trước khi chạy AUTO A→Z!")
+            return
+
+        tiktok_user, tiktok_pass, email, hotmail_pass = extract_tiktok_and_hotmail_creds(target_acc)
+        if not email or not hotmail_pass:
+            self.log_output.append(f"⚠️ Không tìm thấy Email Hotmail hoặc mật khẩu hợp lệ từ chuỗi tài khoản!")
+            return
+
+        # Kiểm tra nhanh xem OAuth2 của nick này đã có và còn sống không
+        outh2, client_id, matched_str = self._resolve_account_oauth2(email, target_acc)
+        if outh2 and client_id:
+            self.log_output.append(f"🔍 [AUTO A→Z] Đang kiểm tra nhanh mã OAuth2 có sẵn của {email}...")
+            QApplication.processEvents()
+            live_token = get_graph_access_token_quick(f"dummy|dummy|{outh2}|{client_id}")
+            if live_token:
+                if matched_str:
+                    self.result_output.setText(matched_str)
+                self.log_output.append(f"✅ [AUTO A→Z] OAuth2 của {email} đang sống tốt! Bỏ qua Bước 1, chuyển thẳng sang Bước 2 (VPN US + GPM TikTok Email+OTP)...")
+                self.start_gpm_email_otp_only()
+                return
+            else:
+                self.log_output.append(f"ℹ️ [AUTO A→Z] Mã OAuth2 cũ của {email} đã hết hạn -> Chạy Bước 1 để lấy lại OAuth2 mới...")
+
+        recovery_list = self.get_recovery_list()
+        if not recovery_list:
+            self.log_output.append("⚠️ Vui lòng thêm ít nhất một email khôi phục để lấy OAuth2 ở Bước 1!")
+            return
+
+        self.global_stop_event.clear()
+        self.global_pause_event.set()
+        self._pending_auto_az_gpm = True
+        self.btn_pause.setText("TẠM DỪNG")
+        self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_start.setEnabled(False)
+        self.btn_auto_az.setEnabled(False)
+        self.btn_gpm_email_login.setEnabled(False)
+        self.result_output.clear()
+
+        self.worker = AutomationWorker(target_acc, recovery_list, close_after_oauth=True)
+        self.worker.log_signal.connect(self.update_log)
+        self.worker.result_signal.connect(self.show_result)
+        self.worker.recovery_changed_signal.connect(self.on_recovery_email_changed)
+        self.worker.finished_signal.connect(self._on_auto_az_oauth_finished)
+        self.worker.start()
+
+        self.log_output.append(
+            f"⚡ [AUTO A→Z - Bước 1] Đang lấy OAuth2 cho {email} (xong sẽ tự đóng trình duyệt phụ & nối tiếp sang GPM Chrome)..."
+        )
+
+    def _on_auto_az_oauth_finished(self):
+        self.btn_start.setEnabled(True)
+        was_pending = self._pending_auto_az_gpm
+        self._pending_auto_az_gpm = False
+        if not was_pending or self.global_stop_event.is_set():
+            self.btn_auto_az.setEnabled(True)
+            self.btn_gpm_email_login.setEnabled(True)
+            return
+
+        res_txt = self.result_output.text().strip()
+        outh2, client_id = parse_oauth2_and_client_id(res_txt)
+        if outh2 and client_id:
+            self.log_output.append("✅ [AUTO A→Z - Bước 1 Hoàn tất] Đã lấy xong OAuth2 & đóng trình duyệt phụ! Chuyển sang Bước 2 (VPN US + GPM TikTok Email+OTP)...")
+            QTimer.singleShot(800, self.start_gpm_email_otp_only)
+        else:
+            self.btn_auto_az.setEnabled(True)
+            self.btn_gpm_email_login.setEnabled(True)
+            self.log_output.append("❌ [AUTO A→Z] Bước 1 chưa lấy được OAuth2 nên tạm dừng, chưa mở GPM.")
+
     def start_process(self):
         target_acc = self.get_current_raw_account()
         recovery_list = self.get_recovery_list()
@@ -6109,7 +6630,12 @@ class MainWindow(QWidget):
             self.log_output.append("🛑 [GPM] Đang đóng trình duyệt profile GPM...")
 
         # 6. Khôi phục trạng thái nút bấm
+        self._pending_auto_az_gpm = False
+        self._auto_advance_after_profile_update = False
         self.btn_start.setEnabled(True)
+        self.btn_play_vpn_gpm.setEnabled(True)
+        self.btn_auto_az.setEnabled(True)
+        self.btn_gpm_email_login.setEnabled(True)
         self.btn_pause.setText("TẠM DỪNG")
         self.btn_pause.setStyleSheet("padding: 10px; background-color: #ff9800; color: white; font-weight: bold; border-radius: 4px;")
         
