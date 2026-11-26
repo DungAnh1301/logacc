@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -293,6 +293,33 @@ def extract_email_and_password(raw_str):
         return parts[0], "", 0
     return None, None, -1
 
+
+def extract_tiktok_and_hotmail_creds(raw_str):
+    """
+    Nhận diện đầy đủ cho cả 2 định dạng tài khoản:
+      1) userid | mk_tiktok | email_hotmail | mk_hotmail | ...  (email_idx >= 2)
+      2) userid | email_hotmail | mk_chung | ...                (email_idx == 1)
+      3) email_hotmail | mk_chung | ...                         (email_idx == 0)
+    Trả về: (tiktok_user, tiktok_pass, hotmail_email, hotmail_pass)
+    """
+    if not raw_str:
+        return "", "", None, ""
+    cleaned = clean_account_string(raw_str)
+    parts = [p.strip() for p in cleaned.split('|') if p.strip()]
+    email, hotmail_pass, email_idx = extract_email_and_password(cleaned)
+    if not email:
+        return "", "", None, ""
+    if email_idx >= 2:
+        tiktok_user = parts[0]
+        tiktok_pass = parts[1]
+    elif email_idx == 1:
+        tiktok_user = parts[0]
+        tiktok_pass = hotmail_pass
+    else:
+        tiktok_user = email.split('@')[0]
+        tiktok_pass = hotmail_pass
+    return tiktok_user, tiktok_pass, email, hotmail_pass
+
 # --- HÀM TỰ ĐỘNG ĐÓNG POPUP / TOOLTIP "GOT IT" / "ĐÃ HIỂU" TRÊN TIKTOK ---
 def dismiss_tiktok_popups(page, log_callback=None):
     """
@@ -358,11 +385,11 @@ def dismiss_tiktok_popups(page, log_callback=None):
     return dismissed
 
 # --- HÀM HỖ TRỢ LẤY OTP TỪ EMAIL KHÔI PHỤC (CHIẾN THUẬT 2 PHÚT / 20S) ---
-def get_outlook_otp_via_api(recovery_acc_str, log_signal, stop_event=None, pause_event=None):
+def get_outlook_otp_via_api(recovery_acc_str, log_signal, stop_event=None, pause_event=None, prefer_sender=None):
     try:
         parts = recovery_acc_str.split('|')
         if len(parts) < 4:
-            log_signal.emit("❌ Định dạng email khôi phục sai! Cần dạng tk|mk|outh2|clientId")
+            log_signal.emit("❌ Định dạng OAuth2 sai! Cần dạng tk|mk|outh2|clientId")
             return None
         
         ref_token = parts[2].strip()
@@ -371,7 +398,7 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal, stop_event=None, pause
         if stop_event and stop_event.is_set():
             return None
 
-        log_signal.emit(f"🔄 Đang dùng OAuth2 của email khôi phục để lấy Access Token...")
+        log_signal.emit("🔄 Đang dùng OAuth2 để lấy Access Token hộp thư...")
         token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
         payload = {
             "client_id": client_id,
@@ -385,18 +412,16 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal, stop_event=None, pause
         access_token = res_data.get('access_token')
 
         if not access_token:
-            log_signal.emit(f"❌ Không đổi được Access Token từ email khôi phục: {res_data.get('error_description')}")
+            log_signal.emit(f"❌ Không đổi được Access Token: {res_data.get('error_description')}")
             return None
 
-        log_signal.emit(f"✅ Đã có Access Token khôi phục. Đang quét hộp thư tìm mã OTP...")
+        log_signal.emit("✅ Đã có Access Token. Đang quét hộp thư tìm mã OTP...")
         
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
-        messages_url = "https://graph.microsoft.com/v1.0/me/messages?$select=subject,bodyPreview,receivedDateTime&$orderby=receivedDateTime%20desc&$top=5"
-
-        start_time_loop = time.time()
+        messages_url = "https://graph.microsoft.com/v1.0/me/messages?$select=subject,bodyPreview,from,receivedDateTime&$orderby=receivedDateTime%20desc&$top=6"
 
         for attempt in range(20):
             if stop_event and stop_event.is_set():
@@ -410,24 +435,39 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal, stop_event=None, pause
             response = requests.get(messages_url, headers=headers, timeout=15)
             if response.status_code == 200:
                 messages = response.json().get('value', [])
-                elapsed_time = time.time() - start_time_loop
                 
                 for msg in messages:
                     received_str = msg.get('receivedDateTime', '')
-                    subject = msg.get('subject', '')
-                    preview = msg.get('bodyPreview', '')
+                    subject = msg.get('subject', '') or ''
+                    preview = msg.get('bodyPreview', '') or ''
+                    sender_addr = (((msg.get('from') or {}).get('emailAddress') or {}).get('address') or '').lower()
                     full_text = f"{subject} {preview}"
-                    
-                    if "microsoft" in full_text.lower() or "mã" in full_text.lower() or "code" in full_text.lower() or "security" in full_text.lower():
-                        match = re.search(r'\b\d{4,7}\b', full_text)
-                        if match:
-                            otp_code = match.group(0)
-                            if received_str:
-                                msg_time = datetime.fromisoformat(received_str.replace('Z', '+00:00'))
-                                time_diff = (datetime.now(timezone.utc) - msg_time).total_seconds()
-                                if time_diff <= 45 and time_diff >= -10:
-                                    log_signal.emit(f"🎯 Bắt được mã OTP mới (Nhận cách đây {int(time_diff)}s): {otp_code}")
-                                    return otp_code
+                    full_low = full_text.lower()
+
+                    if prefer_sender == "tiktok":
+                        is_relevant = ("tiktok" in full_low or "tiktok" in sender_addr or "verification code" in full_low or "mã xác minh" in full_low)
+                    else:
+                        is_relevant = any(kw in full_low for kw in ("microsoft", "tiktok", "mã", "code", "security", "verify", "verification"))
+
+                    if is_relevant:
+                        # Ưu tiên tìm mã 6 chữ số (TikTok & Microsoft chuẩn), sau đó mới tìm 4-7 số (loại trừ năm 2020-2035)
+                        otp_code = None
+                        m6 = re.search(r'\b\d{6}\b', subject) or re.search(r'\b\d{6}\b', preview)
+                        if m6:
+                            otp_code = m6.group(0)
+                        else:
+                            for cand in re.findall(r'\b\d{4,7}\b', full_text):
+                                if not (len(cand) == 4 and 2020 <= int(cand) <= 2035):
+                                    otp_code = cand
+                                    break
+
+                        if otp_code and received_str:
+                            msg_time = datetime.fromisoformat(received_str.replace('Z', '+00:00'))
+                            time_diff = (datetime.now(timezone.utc) - msg_time).total_seconds()
+                            max_age = 90 if prefer_sender == "tiktok" else 55
+                            if -15 <= time_diff <= max_age:
+                                log_signal.emit(f"🎯 Bắt được mã OTP mới (Nhận cách đây {int(time_diff)}s): {otp_code}")
+                                return otp_code
 
             # Chia nhỏ thời gian chờ 4s để phản hồi Stop/Pause ngay lập tức
             for _ in range(20):
@@ -1302,6 +1342,74 @@ def call_gemini_cli_sync(step_name, dom_snapshot, log_signal, timeout_sec=55):
         return None
 
 
+def diagnose_and_assist_tiktok_sync(page, step_desc, log_signal):
+    """Dùng AI (Antigravity CLI agy.exe / Gemini) chẩn đoán màn hình TikTok đang lỗi/kẹt trên GPM Chrome."""
+    try:
+        dom_snapshot = page.evaluate("""() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const s = window.getComputedStyle(el);
+                if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            };
+            const buildSelector = (el) => {
+                if (el.id) return '#' + CSS.escape(el.id);
+                const e2e = el.getAttribute('data-e2e');
+                if (e2e) return `${el.tagName.toLowerCase()}[data-e2e="${e2e}"]`;
+                const testId = el.getAttribute('data-testid');
+                if (testId) return `${el.tagName.toLowerCase()}[data-testid="${testId}"]`;
+                const name = el.getAttribute('name');
+                if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+                return el.tagName.toLowerCase();
+            };
+            const elements = [];
+            for (const el of Array.from(document.querySelectorAll('button, input, a, [role="button"], [role="dialog"]'))) {
+                if (!isVisible(el)) continue;
+                const type = el.getAttribute('type') || '';
+                if (type === 'hidden') continue;
+                elements.push({
+                    tag: el.tagName.toLowerCase(),
+                    type: type,
+                    selector: buildSelector(el),
+                    text: type === 'password' ? '***' : (el.innerText || el.value || '').trim().slice(0, 80),
+                    placeholder: el.getAttribute('placeholder') || ''
+                });
+                if (elements.length >= 30) break;
+            }
+            return {
+                url: window.location.href.slice(0, 200),
+                title: document.title || '',
+                visible_text: (document.body ? document.body.innerText : '').trim().slice(0, 1600),
+                elements: elements
+            };
+        }""")
+    except Exception:
+        return None
+
+    res = call_gemini_cli_sync(f"TikTok GPM ({step_desc})", dom_snapshot, log_signal, timeout_sec=50)
+    if not res:
+        return None
+
+    diagnosis = res.get("diagnosis", "Không xác định rõ tình huống trên TikTok")
+    action = (res.get("action") or "wait").lower().strip()
+    selector = (res.get("selector") or "").strip()
+    log_signal.emit(f"🤖 [AI Phân tích TikTok]: {diagnosis}")
+
+    if action == "click" and selector:
+        # Chỉ click các nút điều hướng/gửi mã/bỏ qua thông thường, tuyệt đối không can thiệp captcha
+        if "captcha" not in selector.lower() and "captcha" not in diagnosis.lower():
+            try:
+                loc = page.locator(selector).first
+                if loc.count() > 0 and loc.is_visible():
+                    loc.click(timeout=4000)
+                    log_signal.emit(f"🤖 [AI TikTok] Đã tự động bấm nút '{selector}'")
+                    return {"action": "acted", "diagnosis": diagnosis}
+            except Exception:
+                pass
+    return {"action": action, "diagnosis": diagnosis}
+
+
 async def run_gemini_cli_fallback(page, step_name, email, password, recovery_list, log_signal, pause_event):
     """Chụp DOM hiện tại, nhờ Gemini CLI chẩn đoán và thực thi hành động đề xuất trên Playwright."""
     await pause_event.wait()
@@ -1380,7 +1488,7 @@ async def run_gemini_cli_fallback(page, step_name, email, password, recovery_lis
     return "wait"
 
 
-async def _run_single_account_session(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event):
+async def _run_single_account_session(raw_input_str, email, password, recovery_list, log_signal, result_signal, pause_event, close_after_oauth=False):
     await pause_event.wait()
     if isinstance(recovery_list, str):
         recovery_list = [recovery_list] if recovery_list.strip() else []
@@ -4108,6 +4216,7 @@ class MainWindow(QWidget):
 
         # Tự động lưu cấu hình mỗi khi người dùng thay đổi giá trị trên giao diện
         self.acc_combo.currentIndexChanged.connect(self.on_acc_combo_index_changed)
+        self.acc_combo.activated.connect(self.on_acc_combo_index_changed)
         self.acc_input.textChanged.connect(self.save_settings_from_gui)
         self.recovery_combo.currentTextChanged.connect(self.save_settings_from_gui)
         self.gpm_profile_input.textChanged.connect(self.save_settings_from_gui)
@@ -4115,11 +4224,43 @@ class MainWindow(QWidget):
         self.cb_change_nickname.toggled.connect(self.save_settings_from_gui)
         self.cb_change_avatar.toggled.connect(self.save_settings_from_gui)
 
+    def get_current_raw_account(self):
+        """Luôn lấy chuỗi tài khoản gốc đầy đủ (userid|email|mk|...), tự khôi phục nếu ô nhập đang hiện nhãn rút gọn '[user] email'."""
+        txt = clean_account_string(self.acc_input.text().strip())
+        if '|' in txt:
+            return txt
+
+        # Nếu không có dấu '|', kiểm tra itemData của dòng đang chọn trên combobox
+        idx = self.acc_combo.currentIndex()
+        if idx >= 0:
+            raw_data = self.acc_combo.itemData(idx)
+            if raw_data:
+                clean_raw = clean_account_string(raw_data)
+                em_in_txt = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', txt)
+                if not txt or (em_in_txt and em_in_txt.group(0).lower() in clean_raw.lower()):
+                    self.acc_input.blockSignals(True)
+                    self.acc_input.setText(clean_raw)
+                    self.acc_input.blockSignals(False)
+                    return clean_raw
+
+        # Dự phòng: tìm trong danh sách target_accounts.txt theo email xuất hiện trong chuỗi
+        m_em = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', txt)
+        if m_em:
+            found_em = m_em.group(0).lower()
+            for acc in load_target_accounts():
+                c_acc = clean_account_string(acc)
+                if found_em in c_acc.lower() and '|' in c_acc:
+                    self.acc_input.blockSignals(True)
+                    self.acc_input.setText(c_acc)
+                    self.acc_input.blockSignals(False)
+                    return c_acc
+        return txt
+
     def on_acc_combo_index_changed(self, index):
         if index >= 0:
             raw = self.acc_combo.itemData(index)
             if raw:
-                QTimer.singleShot(0, lambda: self.acc_input.setText(raw))
+                QTimer.singleShot(0, lambda r=raw: self.acc_input.setText(r))
                 self.save_settings_from_gui()
                 
                 # Tự động nạp kết quả đã lưu vào ô kết quả nếu tài khoản này đã có kết quả trong results.txt
@@ -4132,7 +4273,7 @@ class MainWindow(QWidget):
                     else:
                         self.result_output.clear()
 
-    def refresh_acc_combo(self, select_account=None):
+    def refresh_acc_combo(self, select_account=None, prefer_first_if_missing=False):
         target = clean_account_string(select_account) if select_account else clean_account_string(self.acc_combo.currentText())
         self.acc_combo.blockSignals(True)
         self.acc_combo.clear()
@@ -4141,13 +4282,15 @@ class MainWindow(QWidget):
         completed_emails = load_successful_account_emails()
         
         selected_index = -1
+        m_target_em = re.search(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', target or "")
+        target_em_low = m_target_em.group(0).lower() if m_target_em else ""
+
         for idx, acc in enumerate(accounts):
             clean_acc = clean_account_string(acc)
             em, _, _ = extract_email_and_password(clean_acc)
             is_ok = bool(em and em.lower() in completed_emails)
             status_tag = "✅ [OK]" if is_ok else "⏳"
             
-            # Tự động nhận diện username (nếu có phía trước email, ví dụ userid|mk_tt|email...)
             parts = [p.strip() for p in clean_acc.split('|') if p.strip()]
             user_prefix = ""
             if em and parts:
@@ -4169,20 +4312,31 @@ class MainWindow(QWidget):
             if target:
                 target_clean = clean_account_string(target).lower()
                 acc_clean = clean_acc.lower()
-                if target_clean == acc_clean or (em and em.lower() in target_clean):
+                if target_clean == acc_clean or (em and (em.lower() == target_em_low or em.lower() in target_clean)):
                     selected_index = idx
 
         self.acc_combo.blockSignals(False)
         
         if selected_index >= 0:
+            self.acc_combo.blockSignals(True)
             self.acc_combo.setCurrentIndex(selected_index)
+            self.acc_combo.blockSignals(False)
             raw_val = self.acc_combo.itemData(selected_index)
+            if raw_val:
+                self.acc_input.setText(raw_val)
+        elif accounts and (prefer_first_if_missing or '|' not in (target or '')):
+            self.acc_combo.blockSignals(True)
+            self.acc_combo.setCurrentIndex(0)
+            self.acc_combo.blockSignals(False)
+            raw_val = self.acc_combo.itemData(0)
             if raw_val:
                 self.acc_input.setText(raw_val)
         elif target:
             self.acc_combo.setEditText(target)
         elif accounts:
+            self.acc_combo.blockSignals(True)
             self.acc_combo.setCurrentIndex(0)
+            self.acc_combo.blockSignals(False)
             raw_val = self.acc_combo.itemData(0)
             if raw_val:
                 self.acc_input.setText(raw_val)
@@ -4252,7 +4406,7 @@ class MainWindow(QWidget):
     def open_target_accounts_dialog(self):
         dlg = TargetAccountsDialog(self)
         if dlg.exec():
-            self.refresh_acc_combo()
+            self.refresh_acc_combo(prefer_first_if_missing=True)
             self.log_output.append(f"📋 Đã cập nhật danh sách tài khoản ({len(load_target_accounts())} tài khoản).")
 
     def open_results_dialog(self):
@@ -4299,9 +4453,14 @@ class MainWindow(QWidget):
 
     def save_settings_from_gui(self, *args):
         try:
+            raw_acc = clean_account_string(self.acc_input.text().strip())
+            if '|' not in raw_acc and self.acc_combo.currentIndex() >= 0:
+                item_raw = self.acc_combo.itemData(self.acc_combo.currentIndex())
+                if item_raw:
+                    raw_acc = clean_account_string(item_raw)
             cfg = load_gui_config()
             cfg.update({
-                "acc_input": clean_account_string(self.acc_input.text().strip()),
+                "acc_input": raw_acc,
                 "recovery_email": self.recovery_combo.currentText().strip(),
                 "gpm_profile": self.gpm_profile_input.text().strip(),
                 "gpm_api": self.gpm_api_input.text().strip(),
@@ -5706,7 +5865,7 @@ class MainWindow(QWidget):
             return
 
         # Tự động nhận diện mật khẩu hotmail từ ô acc_input hoặc result_output
-        acc_text = self.acc_input.text().strip() or self.result_output.text().strip()
+        acc_text = self.get_current_raw_account() or self.result_output.text().strip()
         _, account_password, _ = extract_email_and_password(acc_text)
 
         self.global_stop_event.clear()
@@ -5847,7 +6006,7 @@ class MainWindow(QWidget):
 
 
     def start_process(self):
-        target_acc = clean_account_string(self.acc_input.text().strip())
+        target_acc = self.get_current_raw_account()
         recovery_list = self.get_recovery_list()
 
         if not target_acc:
@@ -5978,7 +6137,7 @@ class MainWindow(QWidget):
             self.log_output.append("⚠️ Chưa có kết quả để copy!")
 
     def copy_account_only(self):
-        acc_text = self.acc_input.text().strip()
+        acc_text = self.get_current_raw_account()
         email, _, _ = extract_email_and_password(acc_text)
         if email:
             QApplication.clipboard().setText(email)
@@ -5987,7 +6146,7 @@ class MainWindow(QWidget):
             self.log_output.append("⚠️ Không tìm thấy tài khoản email hợp lệ để copy!")
 
     def copy_password_only(self):
-        acc_text = self.acc_input.text().strip()
+        acc_text = self.get_current_raw_account()
         _, password, _ = extract_email_and_password(acc_text)
         if password:
             QApplication.clipboard().setText(password)
@@ -6033,7 +6192,7 @@ class MainWindow(QWidget):
         result_acc = self.result_output.text().strip()
         
         # 2. Nếu ô kết quả trống, tự động tìm kiếm kết quả của tài khoản đang chọn từ results.txt
-        target_acc = clean_account_string(self.acc_input.text().strip())
+        target_acc = self.get_current_raw_account()
         em_target, _, _ = extract_email_and_password(target_acc)
         
         if not result_acc and em_target:
