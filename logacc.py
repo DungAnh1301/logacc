@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.9"
+APP_VERSION = "1.4.0"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -6799,14 +6799,21 @@ class MainWindow(QWidget):
         self.advance_gpm_profile()
 
     def _set_clipboard_reliable(self, text):
-        """Ghi thẳng CF_UNICODETEXT bằng Win32 API (kèm retry) để TightVNC/RDP bắt được ngay từ lần bấm đầu tiên."""
+        """Ghi thẳng CF_UNICODETEXT + CF_TEXT bằng Win32 API với HWND thật của cửa sổ để TightVNC bắt được ngay 100%."""
         val = str(text or "")
+        # Gọi Qt trước để đồng bộ nội bộ, sau đó ghi đè bằng Win32 trực tiếp (không dùng OLE delayed rendering)
+        try:
+            QApplication.clipboard().setText(val)
+        except Exception:
+            pass
+
         if sys.platform == "win32":
             try:
                 import ctypes
                 from ctypes import wintypes
                 user32 = ctypes.windll.user32
                 kernel32 = ctypes.windll.kernel32
+                CF_TEXT = 1
                 CF_UNICODETEXT = 13
                 GMEM_MOVEABLE = 0x0002
 
@@ -6816,31 +6823,46 @@ class MainWindow(QWidget):
                 user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
                 user32.SetClipboardData.restype = wintypes.HANDLE
                 user32.CloseClipboard.restype = wintypes.BOOL
+                user32.GetForegroundWindow.restype = wintypes.HWND
                 kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
                 kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
                 kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
                 kernel32.GlobalLock.restype = wintypes.LPVOID
                 kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
 
+                hwnd = None
+                try:
+                    hwnd = int(self.winId())
+                except Exception:
+                    hwnd = user32.GetForegroundWindow() or None
+
                 raw_utf16 = (val + "\0").encode("utf-16-le")
-                for _ in range(6):
-                    if user32.OpenClipboard(None):
+                raw_ansi = (val + "\0").encode("mbcs", errors="replace")
+
+                for _ in range(8):
+                    if user32.OpenClipboard(hwnd):
                         try:
-                            user32.EmptyClipboard()
-                            h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw_utf16))
-                            if h_mem:
-                                ptr = kernel32.GlobalLock(h_mem)
-                                if ptr:
-                                    ctypes.memmove(ptr, raw_utf16, len(raw_utf16))
-                                    kernel32.GlobalUnlock(h_mem)
-                                    user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+                            if user32.EmptyClipboard():
+                                h_uni = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw_utf16))
+                                if h_uni:
+                                    ptr_u = kernel32.GlobalLock(h_uni)
+                                    if ptr_u:
+                                        ctypes.memmove(ptr_u, raw_utf16, len(raw_utf16))
+                                        kernel32.GlobalUnlock(h_uni)
+                                        user32.SetClipboardData(CF_UNICODETEXT, h_uni)
+                                h_ansi = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw_ansi))
+                                if h_ansi:
+                                    ptr_a = kernel32.GlobalLock(h_ansi)
+                                    if ptr_a:
+                                        ctypes.memmove(ptr_a, raw_ansi, len(raw_ansi))
+                                        kernel32.GlobalUnlock(h_ansi)
+                                        user32.SetClipboardData(CF_TEXT, h_ansi)
                         finally:
                             user32.CloseClipboard()
                         return
                     time.sleep(0.03)
             except Exception:
                 pass
-        QApplication.clipboard().setText(val)
 
     def copy_result(self):
         text_to_copy = self.result_output.text().strip()
