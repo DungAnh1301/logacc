@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.3.9"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -6798,11 +6798,54 @@ class MainWindow(QWidget):
         self.advance_target_account()
         self.advance_gpm_profile()
 
+    def _set_clipboard_reliable(self, text):
+        """Ghi thẳng CF_UNICODETEXT bằng Win32 API (kèm retry) để TightVNC/RDP bắt được ngay từ lần bấm đầu tiên."""
+        val = str(text or "")
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+                CF_UNICODETEXT = 13
+                GMEM_MOVEABLE = 0x0002
+
+                user32.OpenClipboard.argtypes = [wintypes.HWND]
+                user32.OpenClipboard.restype = wintypes.BOOL
+                user32.EmptyClipboard.restype = wintypes.BOOL
+                user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+                user32.SetClipboardData.restype = wintypes.HANDLE
+                user32.CloseClipboard.restype = wintypes.BOOL
+                kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+                kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+                kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+                kernel32.GlobalLock.restype = wintypes.LPVOID
+                kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+
+                raw_utf16 = (val + "\0").encode("utf-16-le")
+                for _ in range(6):
+                    if user32.OpenClipboard(None):
+                        try:
+                            user32.EmptyClipboard()
+                            h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw_utf16))
+                            if h_mem:
+                                ptr = kernel32.GlobalLock(h_mem)
+                                if ptr:
+                                    ctypes.memmove(ptr, raw_utf16, len(raw_utf16))
+                                    kernel32.GlobalUnlock(h_mem)
+                                    user32.SetClipboardData(CF_UNICODETEXT, h_mem)
+                        finally:
+                            user32.CloseClipboard()
+                        return
+                    time.sleep(0.03)
+            except Exception:
+                pass
+        QApplication.clipboard().setText(val)
+
     def copy_result(self):
         text_to_copy = self.result_output.text().strip()
         if text_to_copy:
-            clipboard = QApplication.clipboard()
-            clipboard.setText(text_to_copy)
+            self._set_clipboard_reliable(text_to_copy)
             self.log_output.append("📋 Đã copy kết quả vào bộ nhớ tạm thành công!")
         else:
             self.log_output.append("⚠️ Chưa có kết quả để copy!")
@@ -6811,7 +6854,7 @@ class MainWindow(QWidget):
         acc_text = self.get_current_raw_account()
         tiktok_user, _, _, _ = extract_tiktok_and_hotmail_creds(acc_text)
         if tiktok_user:
-            QApplication.clipboard().setText(tiktok_user)
+            self._set_clipboard_reliable(tiktok_user)
             self.log_output.append(f"📋 Đã copy Tài khoản (User): {tiktok_user}")
         else:
             self.log_output.append("⚠️ Không tìm thấy tên tài khoản (user...) để copy!")
@@ -6820,7 +6863,7 @@ class MainWindow(QWidget):
         acc_text = self.get_current_raw_account()
         _, _, email, _ = extract_tiktok_and_hotmail_creds(acc_text)
         if email:
-            QApplication.clipboard().setText(email)
+            self._set_clipboard_reliable(email)
             self.log_output.append(f"📋 Đã copy Email: {email}")
         else:
             self.log_output.append("⚠️ Không tìm thấy địa chỉ Email hợp lệ để copy!")
@@ -6830,7 +6873,7 @@ class MainWindow(QWidget):
         _, tiktok_pass, _, hotmail_pass = extract_tiktok_and_hotmail_creds(acc_text)
         pw = tiktok_pass or hotmail_pass
         if pw:
-            QApplication.clipboard().setText(pw)
+            self._set_clipboard_reliable(pw)
             self.log_output.append(f"📋 Đã copy Mật khẩu: {pw}")
         else:
             self.log_output.append("⚠️ Không tìm thấy mật khẩu để copy!")
@@ -6841,7 +6884,7 @@ class MainWindow(QWidget):
         if self.global_stop_event.is_set():
             return
         if otp:
-            QApplication.clipboard().setText(otp)
+            self._set_clipboard_reliable(otp)
             self.log_output.append(f"🎯 ĐÃ COPY MÃ OTP VÀO BỘ NHỚ TẠM: {otp}")
             if self._auto_gpm_after_otp:
                 # Đếm 3s tự động chạy VPN+GPM
