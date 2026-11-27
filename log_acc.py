@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -6842,7 +6842,7 @@ class MainWindow(QWidget):
             return
         if otp:
             QApplication.clipboard().setText(otp)
-            self.update_log(f"🎯 ĐÃ COPY MÃ OTP VÀO BỘ NHỚ TẠM: {otp}")
+            self.log_output.append(f"🎯 ĐÃ COPY MÃ OTP VÀO BỘ NHỚ TẠM: {otp}")
             if self._auto_gpm_after_otp:
                 # Đếm 3s tự động chạy VPN+GPM
                 self.log_output.append("⏳ [OTP + GPM] Đã lấy OTP thành công -> Đang đếm 3s để tự động khởi chạy VPN+GPM...")
@@ -6926,32 +6926,8 @@ class MainWindow(QWidget):
 
         threading.Thread(target=run_otp_worker, daemon=True).start()
 
-    def _format_otp_log_html(self, message):
-        """Phóng to gấp 3 lần (30pt so với 10pt) tất cả các số OTP hiển thị trên bảng Log."""
-        import html as _html
-        raw = str(message or "")
-        low = raw.lower()
-        otp_announce = any(kw in low for kw in (
-            "bắt được mã otp", "đã copy mã otp", "đã lấy được otp",
-            "điền otp", "điền mã otp", "mã otp:", "otp tiktok:"
-        ))
-        if not otp_announce:
-            return None
-        escaped = _html.escape(raw)
-        # Chỉ phóng to cụm 4-8 chữ số OTP đứng độc lập (tránh phóng nhầm 20s, 3s, 6 số...)
-        styled = re.sub(
-            r'(?<![\d/])(\d{4,8})(?![\d/sS])',
-            r'<span style="font-size: 30pt; font-weight: bold; color: #ffeb3b;">\1</span>',
-            escaped
-        )
-        return f'<span style="font-size: 10pt; color: #00ff00;">{styled}</span>'
-
     def update_log(self, message):
-        otp_html = self._format_otp_log_html(message)
-        if otp_html:
-            self.log_output.append(otp_html)
-        else:
-            self.log_output.append(message)
+        self.log_output.append(message)
         self.log_output.moveCursor(QTextCursor.MoveOperation.End)
 
     def show_result(self, result_str):
