@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -393,7 +393,9 @@ def get_outlook_otp_via_api(recovery_acc_str, log_signal, stop_event=None, pause
             return None
         
         ref_token = parts[2].strip()
-        client_id = parts[3].strip()
+        raw_cid = parts[3].strip()
+        m_cid = re.search(r'[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', raw_cid)
+        client_id = m_cid.group(0) if m_cid else raw_cid
 
         if stop_event and stop_event.is_set():
             return None
@@ -493,7 +495,9 @@ def get_graph_access_token_quick(recovery_acc_str):
         if len(parts) < 4:
             return None
         ref_token = parts[2].strip()
-        client_id = parts[3].strip()
+        raw_cid = parts[3].strip()
+        m_cid = re.search(r'[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}', raw_cid)
+        client_id = m_cid.group(0) if m_cid else raw_cid
         token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
         payload = {
             "client_id": client_id,
