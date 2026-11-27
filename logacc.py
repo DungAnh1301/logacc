@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -4133,36 +4133,44 @@ class MainWindow(QWidget):
         result_container.addLayout(row1)
         main_layout.addLayout(result_container)
 
-        # --- 2. DÒNG 2: COPY TÀI KHOẢN + COPY MẬT KHẨU + COPY OTP + PLAY VPN+GPM + ĐỔI TÊN+AVATAR ---
+        # --- 2. DÒNG 2: COPY TÀI KHOẢN + COPY EMAIL + COPY MẬT KHẨU + COPY OTP + PLAY VPN+GPM + ĐỔI TÊN+AVATAR ---
         row2 = QHBoxLayout()
         
         btn_copy_tk = QPushButton("Copy Tài Khoản")
-        btn_copy_tk.setStyleSheet("padding: 10px; background-color: #00897b; color: white; font-weight: bold; border-radius: 4px;")
+        btn_copy_tk.setStyleSheet("padding: 10px 6px; background-color: #00897b; color: white; font-weight: bold; border-radius: 4px;")
+        btn_copy_tk.setToolTip("Copy tên tài khoản / username (ví dụ: user3358461781195)")
         btn_copy_tk.clicked.connect(self.copy_account_only)
 
+        btn_copy_email = QPushButton("Copy Email")
+        btn_copy_email.setStyleSheet("padding: 10px 6px; background-color: #0277bd; color: white; font-weight: bold; border-radius: 4px;")
+        btn_copy_email.setToolTip("Copy địa chỉ Email Hotmail")
+        btn_copy_email.clicked.connect(self.copy_email_only)
+
         btn_copy_mk = QPushButton("Copy Mật Khẩu")
-        btn_copy_mk.setStyleSheet("padding: 10px; background-color: #5e35b1; color: white; font-weight: bold; border-radius: 4px;")
+        btn_copy_mk.setStyleSheet("padding: 10px 6px; background-color: #5e35b1; color: white; font-weight: bold; border-radius: 4px;")
+        btn_copy_mk.setToolTip("Copy mật khẩu tài khoản")
         btn_copy_mk.clicked.connect(self.copy_password_only)
 
         btn_copy_otp = QPushButton("Copy OTP")
-        btn_copy_otp.setStyleSheet("padding: 10px; background-color: #d81b60; color: white; font-weight: bold; border-radius: 4px;")
+        btn_copy_otp.setStyleSheet("padding: 10px 6px; background-color: #d81b60; color: white; font-weight: bold; border-radius: 4px;")
         btn_copy_otp.setToolTip("Chỉ quét và copy mã OTP riêng (không chạy GPM)")
         btn_copy_otp.clicked.connect(lambda: self.fetch_and_copy_otp(auto_gpm=False))
 
-        # Nút ở vị trí thứ 4: Copy Link & Đổi VPN sang US
+        # Nút ở vị trí thứ 5: Copy Link & Đổi VPN sang US
         self.btn_play_vpn_gpm = QPushButton("Play VPN+GPM")
-        self.btn_play_vpn_gpm.setStyleSheet("padding: 10px; background-color: #37474f; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_play_vpn_gpm.setStyleSheet("padding: 10px 6px; background-color: #37474f; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_play_vpn_gpm.clicked.connect(self.copy_link_and_vpn)
         self.btn_play_vpn_gpm.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        # Nút ở vị trí thứ 5: Đổi Tên + Avatar TikTok
+        # Nút ở vị trí thứ 6: Đổi Tên + Avatar TikTok
         self.btn_change_name_avatar = QPushButton("Đổi Tên + Avatar")
-        self.btn_change_name_avatar.setStyleSheet("padding: 10px; background-color: #e65100; color: white; font-weight: bold; border-radius: 4px;")
+        self.btn_change_name_avatar.setStyleSheet("padding: 10px 6px; background-color: #e65100; color: white; font-weight: bold; border-radius: 4px;")
         self.btn_change_name_avatar.clicked.connect(self.trigger_change_name_avatar)
         self.btn_change_name_avatar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        # Đưa cả 5 nút vào row2 với stretch=1 để bằng nhau hoàn toàn
+        # Đưa cả 6 nút vào row2 với stretch=1 để cân đối hoàn toàn
         row2.addWidget(btn_copy_tk, stretch=1)
+        row2.addWidget(btn_copy_email, stretch=1)
         row2.addWidget(btn_copy_mk, stretch=1)
         row2.addWidget(btn_copy_otp, stretch=1)
         row2.addWidget(self.btn_play_vpn_gpm, stretch=1)
@@ -6784,21 +6792,31 @@ class MainWindow(QWidget):
 
     def copy_account_only(self):
         acc_text = self.get_current_raw_account()
-        email, _, _ = extract_email_and_password(acc_text)
+        tiktok_user, _, _, _ = extract_tiktok_and_hotmail_creds(acc_text)
+        if tiktok_user:
+            QApplication.clipboard().setText(tiktok_user)
+            self.log_output.append(f"📋 Đã copy Tài khoản (User): {tiktok_user}")
+        else:
+            self.log_output.append("⚠️ Không tìm thấy tên tài khoản (user...) để copy!")
+
+    def copy_email_only(self):
+        acc_text = self.get_current_raw_account()
+        _, _, email, _ = extract_tiktok_and_hotmail_creds(acc_text)
         if email:
             QApplication.clipboard().setText(email)
-            self.log_output.append(f"📋 Đã copy Tài khoản email: {email}")
+            self.log_output.append(f"📋 Đã copy Email: {email}")
         else:
-            self.log_output.append("⚠️ Không tìm thấy tài khoản email hợp lệ để copy!")
+            self.log_output.append("⚠️ Không tìm thấy địa chỉ Email hợp lệ để copy!")
 
     def copy_password_only(self):
         acc_text = self.get_current_raw_account()
-        _, password, _ = extract_email_and_password(acc_text)
-        if password:
-            QApplication.clipboard().setText(password)
-            self.log_output.append(f"📋 Đã copy Mật khẩu email: {password}")
+        _, tiktok_pass, _, hotmail_pass = extract_tiktok_and_hotmail_creds(acc_text)
+        pw = tiktok_pass or hotmail_pass
+        if pw:
+            QApplication.clipboard().setText(pw)
+            self.log_output.append(f"📋 Đã copy Mật khẩu: {pw}")
         else:
-            self.log_output.append("⚠️ Không tìm thấy mật khẩu email để copy!")
+            self.log_output.append("⚠️ Không tìm thấy mật khẩu để copy!")
 
     def on_otp_received(self, otp):
         """Nhận kết quả OTP từ luồng ngầm và copy vào clipboard an toàn trên main thread"""
