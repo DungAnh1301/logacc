@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.3.7"
+APP_VERSION = "1.3.8"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -3873,6 +3873,7 @@ class MainWindow(QWidget):
     gpm_api_detected_signal = pyqtSignal(str)
     otp_received_signal = pyqtSignal(str)
     auto_advance_next_signal = pyqtSignal()
+    trigger_change_name_avatar_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -3893,6 +3894,7 @@ class MainWindow(QWidget):
         self.gpm_api_detected_signal.connect(self.on_gpm_api_detected)
         self.otp_received_signal.connect(self.on_otp_received)
         self.auto_advance_next_signal.connect(self._on_auto_advance_next)
+        self.trigger_change_name_avatar_signal.connect(self.trigger_change_name_avatar)
         self.initUI()
 
         # Tự động quét API / khởi động GPM & giải License sau 1.2s khi mở app
@@ -5327,18 +5329,20 @@ class MainWindow(QWidget):
                         return
                     self.background_log_signal.emit(f"🌐 [VPN US] Đang kết nối ExpressVPN tới: {server_slug.upper()}...")
                     
-                    subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True)
+                    subprocess.run(f'{cmd_path} disconnect', shell=True, capture_output=True, timeout=15)
                     if self.wait_if_paused_or_stopped(1.5):
                         return
-                    subprocess.run(f'{cmd_path} connect "{server_slug}"', shell=True, capture_output=True)
+                    subprocess.run(f'{cmd_path} connect "{server_slug}"', shell=True, capture_output=True, timeout=20)
                     
+                    # Chờ tối đa 16s để ExpressVPN kết nối ổn định
                     is_connected = False
-                    for _ in range(4):
+                    for _ in range(8):
                         if self.wait_if_paused_or_stopped(2):
                             return
-                        res = subprocess.run(f'{cmd_path} status', shell=True, capture_output=True, text=True)
-                        status_text = res.stdout.strip()
-                        if "Connected to" in status_text or "connectionstate: Connected" in status_text or "Connected" in status_text:
+                        res = subprocess.run(f'{cmd_path} status', shell=True, capture_output=True, text=True, timeout=10)
+                        status_text = (res.stdout or "").strip()
+                        low_st = status_text.lower()
+                        if ("connected to " in low_st or "connectionstate: connected" in low_st) and "disconnected" not in low_st and "disconnecting" not in low_st:
                             is_connected = True
                             break
                     
@@ -5351,7 +5355,8 @@ class MainWindow(QWidget):
                         continue
 
                     conn_failures = 0
-                    if self.wait_if_paused_or_stopped():
+                    # Đợi 2s cho card mạng/DNS ExpressVPN ổn định hẳn trước khi mở GPM Chrome
+                    if self.wait_if_paused_or_stopped(2):
                         return
                     self.background_log_signal.emit(f"🌍 [Bước 2] VPN đã kết nối US ({server_slug.upper()}) thành công!")
                     gpm_res = self.open_gpm_profile_and_tiktok(
@@ -5408,7 +5413,7 @@ class MainWindow(QWidget):
                 self.background_log_signal.emit("🚀 [Tự động] Đã đăng nhập TikTok thành công -> Tự động chuyển sang Đổi Tên Nick & Avatar sau 2s...")
                 if self.wait_if_paused_or_stopped(2):
                     return
-                self.trigger_change_name_avatar()
+                self.trigger_change_name_avatar_signal.emit()
             else:
                 self.background_log_signal.emit("ℹ️ [TikTok] Đã đăng nhập TikTok thành công (Tùy chọn Đổi tên/Avatar đang tắt).")
                 self.background_log_signal.emit("🛑 [TikTok] Đang đóng trình duyệt Chrome GPM...")
@@ -5767,8 +5772,20 @@ class MainWindow(QWidget):
                         return False
                     if err_txt and (not ai_res or ai_res.get("action") != "acted"):
                         return False
-            except Exception:
-                pass
+            except Exception as loop_err:
+                err_low = str(loop_err).lower()
+                if "target page, context or browser has been closed" in err_low or "targetclosederror" in err_low or "connection" in err_low:
+                    try:
+                        if target_tab.is_closed():
+                            ctx_pages = [pg for pg in target_tab.context.pages if not pg.is_closed() and "tiktok.com" in pg.url.lower()]
+                            if ctx_pages:
+                                target_tab = ctx_pages[0]
+                                continue
+                            self.background_log_signal.emit("⚠️ [GPM/CDP] Tab hoặc trình duyệt GPM Chrome đã bị đóng/mất kết nối giữa chừng!")
+                            return False
+                    except Exception:
+                        self.background_log_signal.emit("⚠️ [GPM/CDP] Mất kết nối CDP tới trình duyệt GPM Chrome!")
+                        return False
 
         self.background_log_signal.emit("⚠️ [TikTok Email] Hết 95s chờ đăng nhập Email+OTP -> Gọi AI phân tích trạng thái cuối...")
         diagnose_and_assist_tiktok_sync(target_tab, "Hết thời gian chờ đăng nhập", sig)
@@ -6310,7 +6327,7 @@ class MainWindow(QWidget):
                                 self.background_log_signal.emit("🚀 [Tự động] Đã đăng nhập TikTok thành công -> Tự động chuyển sang Đổi Tên Nick & Avatar sau 2s...")
                                 if self.wait_if_paused_or_stopped(2):
                                     return
-                                self.trigger_change_name_avatar()
+                                self.trigger_change_name_avatar_signal.emit()
                             else:
                                 self.background_log_signal.emit("ℹ️ [TikTok] Đã đăng nhập TikTok thành công (Tùy chọn Đổi tên/Avatar đang tắt).")
                                 self.background_log_signal.emit("🛑 [TikTok] Đang đóng trình duyệt Chrome...")
