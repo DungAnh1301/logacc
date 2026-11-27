@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -6798,76 +6798,11 @@ class MainWindow(QWidget):
         self.advance_target_account()
         self.advance_gpm_profile()
 
-    def _set_clipboard_reliable(self, text):
-        """Ghi thẳng CF_UNICODETEXT + CF_TEXT bằng Win32 API với HWND thật của cửa sổ để TightVNC bắt được ngay 100%."""
-        val = str(text or "")
-        # Gọi Qt trước để đồng bộ nội bộ, sau đó ghi đè bằng Win32 trực tiếp (không dùng OLE delayed rendering)
-        try:
-            QApplication.clipboard().setText(val)
-        except Exception:
-            pass
-
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                from ctypes import wintypes
-                user32 = ctypes.windll.user32
-                kernel32 = ctypes.windll.kernel32
-                CF_TEXT = 1
-                CF_UNICODETEXT = 13
-                GMEM_MOVEABLE = 0x0002
-
-                user32.OpenClipboard.argtypes = [wintypes.HWND]
-                user32.OpenClipboard.restype = wintypes.BOOL
-                user32.EmptyClipboard.restype = wintypes.BOOL
-                user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
-                user32.SetClipboardData.restype = wintypes.HANDLE
-                user32.CloseClipboard.restype = wintypes.BOOL
-                user32.GetForegroundWindow.restype = wintypes.HWND
-                kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
-                kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-                kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-                kernel32.GlobalLock.restype = wintypes.LPVOID
-                kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-
-                hwnd = None
-                try:
-                    hwnd = int(self.winId())
-                except Exception:
-                    hwnd = user32.GetForegroundWindow() or None
-
-                raw_utf16 = (val + "\0").encode("utf-16-le")
-                raw_ansi = (val + "\0").encode("mbcs", errors="replace")
-
-                for _ in range(8):
-                    if user32.OpenClipboard(hwnd):
-                        try:
-                            if user32.EmptyClipboard():
-                                h_uni = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw_utf16))
-                                if h_uni:
-                                    ptr_u = kernel32.GlobalLock(h_uni)
-                                    if ptr_u:
-                                        ctypes.memmove(ptr_u, raw_utf16, len(raw_utf16))
-                                        kernel32.GlobalUnlock(h_uni)
-                                        user32.SetClipboardData(CF_UNICODETEXT, h_uni)
-                                h_ansi = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(raw_ansi))
-                                if h_ansi:
-                                    ptr_a = kernel32.GlobalLock(h_ansi)
-                                    if ptr_a:
-                                        ctypes.memmove(ptr_a, raw_ansi, len(raw_ansi))
-                                        kernel32.GlobalUnlock(h_ansi)
-                                        user32.SetClipboardData(CF_TEXT, h_ansi)
-                        finally:
-                            user32.CloseClipboard()
-                        return
-                    time.sleep(0.03)
-            except Exception:
-                pass
-
     def copy_result(self):
         text_to_copy = self.result_output.text().strip()
         if text_to_copy:
-            self._set_clipboard_reliable(text_to_copy)
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text_to_copy)
             self.log_output.append("📋 Đã copy kết quả vào bộ nhớ tạm thành công!")
         else:
             self.log_output.append("⚠️ Chưa có kết quả để copy!")
@@ -6876,7 +6811,7 @@ class MainWindow(QWidget):
         acc_text = self.get_current_raw_account()
         tiktok_user, _, _, _ = extract_tiktok_and_hotmail_creds(acc_text)
         if tiktok_user:
-            self._set_clipboard_reliable(tiktok_user)
+            QApplication.clipboard().setText(tiktok_user)
             self.log_output.append(f"📋 Đã copy Tài khoản (User): {tiktok_user}")
         else:
             self.log_output.append("⚠️ Không tìm thấy tên tài khoản (user...) để copy!")
@@ -6885,7 +6820,7 @@ class MainWindow(QWidget):
         acc_text = self.get_current_raw_account()
         _, _, email, _ = extract_tiktok_and_hotmail_creds(acc_text)
         if email:
-            self._set_clipboard_reliable(email)
+            QApplication.clipboard().setText(email)
             self.log_output.append(f"📋 Đã copy Email: {email}")
         else:
             self.log_output.append("⚠️ Không tìm thấy địa chỉ Email hợp lệ để copy!")
@@ -6895,7 +6830,7 @@ class MainWindow(QWidget):
         _, tiktok_pass, _, hotmail_pass = extract_tiktok_and_hotmail_creds(acc_text)
         pw = tiktok_pass or hotmail_pass
         if pw:
-            self._set_clipboard_reliable(pw)
+            QApplication.clipboard().setText(pw)
             self.log_output.append(f"📋 Đã copy Mật khẩu: {pw}")
         else:
             self.log_output.append("⚠️ Không tìm thấy mật khẩu để copy!")
@@ -6906,7 +6841,7 @@ class MainWindow(QWidget):
         if self.global_stop_event.is_set():
             return
         if otp:
-            self._set_clipboard_reliable(otp)
+            QApplication.clipboard().setText(otp)
             self.log_output.append(f"🎯 ĐÃ COPY MÃ OTP VÀO BỘ NHỚ TẠM: {otp}")
             if self._auto_gpm_after_otp:
                 # Đếm 3s tự động chạy VPN+GPM
