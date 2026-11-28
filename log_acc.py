@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.4.7"
+APP_VERSION = "1.4.8"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -4066,14 +4066,16 @@ class MainWindow(QWidget):
         self.gpm_profile_input = QLineEdit()
         self.gpm_profile_input.setPlaceholderText("Ví dụ: SA-75-1")
         self.gpm_profile_input.setText("")
+        self.gpm_profile_input.setFixedWidth(165)
         self.gpm_profile_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 8px; border-radius: 4px; color: #ffcc80;")
 
         self.gpm_max_slot_spin = QSpinBox()
         self.gpm_max_slot_spin.setRange(1, 99)
         self.gpm_max_slot_spin.setValue(5)
-        self.gpm_max_slot_spin.setFixedWidth(56)
+        self.gpm_max_slot_spin.setFixedWidth(92)
+        self.gpm_max_slot_spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.gpm_max_slot_spin.setToolTip("Số đuôi tối đa trước khi nhảy nhóm GPM (ví dụ điền 3: -1 → -2 → -3 rồi lên nhóm mới)")
-        self.gpm_max_slot_spin.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 6px; border-radius: 4px; color: #80cbc4; font-weight: bold;")
+        self.gpm_max_slot_spin.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 5px 6px; border-radius: 4px; color: #80cbc4; font-size: 14px; font-weight: bold;")
 
         self.btn_bind_accounts_gpm = QPushButton("🔗 Nạp")
         self.btn_bind_accounts_gpm.setStyleSheet("padding: 8px 12px; background-color: #0277bd; color: white; border-radius: 4px; font-weight: bold;")
@@ -4086,11 +4088,11 @@ class MainWindow(QWidget):
         self.btn_bulk_create_gpm.clicked.connect(self.open_bulk_create_gpm_dialog)
 
         gpm_layout.addWidget(QLabel("<b>Profile GPM:</b>"))
-        gpm_layout.addWidget(self.gpm_profile_input, stretch=1)
+        gpm_layout.addWidget(self.gpm_profile_input)
         gpm_layout.addWidget(QLabel("<b>Số nhảy:</b>"))
         gpm_layout.addWidget(self.gpm_max_slot_spin)
         gpm_layout.addWidget(self.btn_bind_accounts_gpm)
-        gpm_layout.addWidget(self.btn_bulk_create_gpm)
+        gpm_layout.addWidget(self.btn_bulk_create_gpm, stretch=1)
         main_layout.addLayout(gpm_layout)
 
         # Ô 4: Local API GPM có thể thay đổi trực tiếp trên GUI
