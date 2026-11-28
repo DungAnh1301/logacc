@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -1346,8 +1346,8 @@ def call_gemini_cli_sync(step_name, dom_snapshot, log_signal, timeout_sec=55):
         return None
 
 
-def diagnose_and_assist_tiktok_sync(page, step_desc, log_signal):
-    """Dùng AI (Antigravity CLI agy.exe / Gemini) chẩn đoán màn hình TikTok đang lỗi/kẹt trên GPM Chrome."""
+def diagnose_and_assist_tiktok_sync(page, step_desc, log_signal, email=None, password=None):
+    """Dùng AI (Antigravity CLI agy.exe / Gemini) chẩn đoán & xử lý màn hình TikTok đang lỗi/kẹt trên GPM Chrome."""
     try:
         dom_snapshot = page.evaluate("""() => {
             const isVisible = (el) => {
@@ -1398,6 +1398,8 @@ def diagnose_and_assist_tiktok_sync(page, step_desc, log_signal):
     diagnosis = res.get("diagnosis", "Không xác định rõ tình huống trên TikTok")
     action = (res.get("action") or "wait").lower().strip()
     selector = (res.get("selector") or "").strip()
+    next_selector = (res.get("next_selector") or "").strip()
+    value_type = (res.get("value_type") or "none").lower().strip()
     log_signal.emit(f"🤖 [AI Phân tích TikTok]: {diagnosis}")
 
     if action == "click" and selector:
@@ -1406,8 +1408,26 @@ def diagnose_and_assist_tiktok_sync(page, step_desc, log_signal):
             try:
                 loc = page.locator(selector).first
                 if loc.count() > 0 and loc.is_visible():
-                    loc.click(timeout=4000)
+                    loc.click(timeout=4000, force=True)
                     log_signal.emit(f"🤖 [AI TikTok] Đã tự động bấm nút '{selector}'")
+                    return {"action": "acted", "diagnosis": diagnosis}
+            except Exception:
+                pass
+    elif action == "fill_and_next" and selector:
+        fill_val = email if value_type == "email" else (password if value_type == "password" else "")
+        if fill_val:
+            try:
+                inp = page.locator(selector).first
+                if inp.count() > 0 and inp.is_visible():
+                    inp.click(force=True, timeout=2000)
+                    inp.fill("")
+                    inp.fill(fill_val)
+                    log_signal.emit(f"🤖 [AI TikTok] Đã điền {value_type} vào '{selector}'")
+                    if next_selector:
+                        nxt = page.locator(next_selector).first
+                        if nxt.count() > 0 and nxt.is_visible():
+                            nxt.click(timeout=4000, force=True)
+                            log_signal.emit(f"🤖 [AI TikTok] Đã bấm nút tiếp theo '{next_selector}'")
                     return {"action": "acted", "diagnosis": diagnosis}
             except Exception:
                 pass
@@ -6196,32 +6216,44 @@ class MainWindow(QWidget):
                                                 target_tab.keyboard.press("Enter")
 
                                             target_tab.wait_for_timeout(500)
-                                            # Thử click nút submit/login nếu có
+                                            # Thử click nút submit/login nếu có (hỗ trợ cả tiếng Anh & Tiếng Việt: Tiếp / Tiếp tục / Đăng nhập)
                                             for submit_sel in [
                                                 'button[type="submit"]',
                                                 'button[data-e2e="login-button"]',
-                                                'button:has-text("Log in")',
-                                                'button:has-text("Đăng nhập")',
-                                                'button:has-text("Next")',
+                                                'button:text-is("Tiếp")',
+                                                'button:has-text("Tiếp")',
                                                 'button:has-text("Tiếp tục")',
+                                                'button:has-text("Đăng nhập")',
+                                                'button:has-text("Log in")',
+                                                'button:has-text("Next")',
                                                 'button:has-text("Continue")',
+                                                'div[role="button"]:has-text("Tiếp")',
+                                                '[class*="Button"]:has-text("Tiếp")',
                                                 '[class*="Button"]:has-text("Log in")',
                                                 '[class*="Button"]:has-text("Next")'
                                             ]:
                                                 try:
                                                     s_btn = target_tab.locator(submit_sel).first
                                                     if s_btn.count() > 0 and s_btn.is_visible(timeout=200):
-                                                        s_btn.click(timeout=1000, force=True)
+                                                        s_btn.click(timeout=1500, force=True)
                                                         break
                                                 except Exception:
                                                     pass
 
                                             self.background_log_signal.emit("🚀 [TikTok] Đã gửi mật khẩu xác minh, đang chờ phê duyệt đăng nhập...")
                                             has_filled_pass = True
+                                            qr_pw_stuck_sec = 0
                                             target_tab.wait_for_timeout(2500)
                                             continue
                                         else:
                                             self.background_log_signal.emit("⚠️ [TikTok] Phát hiện ô nhập mật khẩu nhưng chuỗi tài khoản chưa có mật khẩu để điền tự động.")
+                                    elif is_pass_visible and has_filled_pass:
+                                        qr_pw_stuck_sec = locals().get("qr_pw_stuck_sec", 0) + 1
+                                        if qr_pw_stuck_sec == 6:
+                                            class _QrSig:
+                                                def __init__(self, fn): self.emit = fn
+                                            self.background_log_signal.emit("🤖 [AI Tự động] Thấy màn hình mật khẩu vẫn đứng yên -> Đang gọi Gemini xử lý...")
+                                            diagnose_and_assist_tiktok_sync(target_tab, "Xác minh mật khẩu QR bị kẹt", _QrSig(self.background_log_signal.emit), password=account_password)
 
                                     # 3. Kiểm tra màn hình "Verify it’s really you" và click chọn mục 'Password'
                                     clicked_pw_option = False
@@ -6955,6 +6987,69 @@ class MainWindow(QWidget):
         if not has_updated:
             self.btn_update.setEnabled(True)
 
+    def trigger_emergency_gemini_assist(self):
+        """Kết nối ngay vào Chrome GPM đang mở, cho Gemini/Antigravity đọc DOM và bấm qua hoặc báo lỗi trang đang kẹt."""
+        profile_name = self.gpm_profile_input.text().strip()
+        api_url = (self.gpm_api_input.text().strip() or "http://127.0.0.1:13600/api/v3").rstrip("/")
+        raw_acc = self.get_current_raw_account()
+        _, tiktok_pass, email, hotmail_pass = extract_tiktok_and_hotmail_creds(raw_acc)
+        pw = tiktok_pass or hotmail_pass
+
+        self.log_output.append(f"🚨 [Gemini Khẩn Cấp] Đang kết nối vào GPM ({profile_name or 'đang mở'}) để xử lý màn hình hiện tại...")
+
+        def _run_emergency():
+            class _Sig:
+                def __init__(self, fn): self.emit = fn
+            sig = _Sig(self.background_log_signal.emit)
+            try:
+                target_api = api_url
+                target_pid = None
+                if self.active_gpm_profile:
+                    target_api, target_pid = self.active_gpm_profile
+                    target_api = target_api.rstrip("/")
+                elif profile_name:
+                    prof = find_gpm_profile(target_api, profile_name)
+                    if prof:
+                        target_pid = prof.get("id")
+
+                if not target_pid:
+                    sig.emit("⚠️ [Gemini Khẩn Cấp] Chưa xác định được Profile GPM đang mở. Hãy kiểm tra tên Profile GPM!")
+                    return
+
+                start_res = requests.get(f"{target_api}/profiles/start/{target_pid}", timeout=15)
+                payload = start_res.json()
+                remote_addr = (payload.get("data") or {}).get("remote_debugging_address")
+                if not remote_addr:
+                    sig.emit(f"⚠️ [Gemini Khẩn Cấp] GPM không trả về cổng CDP: {payload.get('message', '')}")
+                    return
+                if not remote_addr.startswith(("http://", "https://")):
+                    remote_addr = f"http://{remote_addr}"
+
+                patch_playwright_driver()
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    browser = p.chromium.connect_over_cdp(remote_addr, timeout=6000)
+                    if not browser.contexts:
+                        sig.emit("⚠️ [Gemini Khẩn Cấp] Không tìm thấy tab trình duyệt trên GPM.")
+                        return
+                    pages = [pg for pg in browser.contexts[0].pages if not pg.is_closed() and "chrome-extension://" not in pg.url.lower()]
+                    target_tab = next((pg for pg in pages if "tiktok.com" in pg.url.lower()), pages[0] if pages else None)
+                    if not target_tab:
+                        sig.emit("⚠️ [Gemini Khẩn Cấp] Không tìm thấy tab TikTok/Web nào đang mở.")
+                        return
+                    sig.emit(f"🔍 [Gemini Khẩn Cấp] Đang đọc giao diện tại: {target_tab.url}")
+                    res = diagnose_and_assist_tiktok_sync(target_tab, "Xử lý khẩn cấp theo yêu cầu người dùng", sig, email=email, password=pw)
+                    if not res:
+                        sig.emit("❌ [Gemini Khẩn Cấp] AI không trả về hướng dẫn xử lý.")
+                    elif res.get("action") == "acted":
+                        sig.emit(f"✅ [Gemini Khẩn Cấp] Đã tự động xử lý xong! ({res.get('diagnosis', '')})")
+                    else:
+                        sig.emit(f"ℹ️ [Gemini Khẩn Cấp] Kết luận: {res.get('diagnosis', '')}")
+            except Exception as ex:
+                sig.emit(f"❌ [Gemini Khẩn Cấp] Lỗi thực thi: {str(ex)[:150]}")
+
+        threading.Thread(target=_run_emergency, daemon=True).start()
+
     def open_gemini_cli_login(self):
         """Hiển thị cấu hình AI Fallback (Antigravity CLI agy.exe tự động hoặc nhập Gemini API Key)."""
         installed, logged_in, detail = check_gemini_cli_auth_status()
@@ -6988,6 +7083,10 @@ class MainWindow(QWidget):
         key_input.setPlaceholderText("AIzaSy... (Để trống sẽ tự động dùng Antigravity CLI agy.exe)")
         lay.addWidget(key_input)
 
+        btn_emergency = QPushButton("🚨 GỌI GEMINI KHẨN CẤP (Xử lý trang GPM đang bị kẹt ngay)")
+        btn_emergency.setStyleSheet("padding: 11px 14px; background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; font-size: 10.5pt;")
+        lay.addWidget(btn_emergency)
+
         btn_row = QHBoxLayout()
         btn_save = QPushButton("💾 Lưu Cấu Hình")
         btn_save.setStyleSheet("padding: 8px 14px; background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;")
@@ -6997,6 +7096,15 @@ class MainWindow(QWidget):
 
         btn_open_agy = QPushButton("🖥️ Mở AGY CLI")
         btn_open_agy.setStyleSheet("padding: 8px 14px; background-color: #4a148c; color: white; font-weight: bold; border-radius: 4px;")
+
+        def _emergency():
+            cfg = load_gui_config()
+            cfg["gemini_api_key"] = key_input.text().strip()
+            save_gui_config(cfg)
+            dlg.accept()
+            self.trigger_emergency_gemini_assist()
+
+        btn_emergency.clicked.connect(_emergency)
 
         def _save():
             cfg = load_gui_config()
