@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -7050,6 +7050,103 @@ class MainWindow(QWidget):
 
         threading.Thread(target=_run_emergency, daemon=True).start()
 
+    def trigger_gemini_self_patch(self, user_note=""):
+        """Gọi Antigravity CLI (agy.exe) tự đọc Log + DOM GPM đang mở, sửa code logacc.py, compile test và đẩy bản update lên GitHub."""
+        agy_bin = find_agy_cli_executable()
+        if not agy_bin:
+            self.log_output.append("⚠️ [Gemini Tự Sửa Code] Không tìm thấy agy.exe trên máy!")
+            return
+
+        repo_dir = None
+        for cand in [APP_DIR, os.path.dirname(APP_DIR), os.getcwd(), r"E:\Outh2 hotmail"]:
+            if cand and os.path.isfile(os.path.join(cand, "logacc.py")) and os.path.isdir(os.path.join(cand, ".git")):
+                repo_dir = os.path.abspath(cand)
+                break
+        if not repo_dir:
+            self.log_output.append("⚠️ [Gemini Tự Sửa Code] Không tìm thấy thư mục mã nguồn Git chứa logacc.py!")
+            return
+
+        recent_logs = "\n".join(self.log_output.toPlainText().splitlines()[-30:])
+        profile_name = self.gpm_profile_input.text().strip()
+        api_url = (self.gpm_api_input.text().strip() or "http://127.0.0.1:13600/api/v3").rstrip("/")
+        active_prof = self.active_gpm_profile
+
+        self.log_output.append(f"🛠️ [Gemini Tự Sửa Code] Đang khởi động Antigravity CLI để phân tích lỗi & tự vá bản mới tại {repo_dir}...")
+
+        def _run_patch():
+            sig = self.background_log_signal
+            dom_summary = "(Không có trình duyệt GPM đang mở)"
+            try:
+                target_api, target_pid = (active_prof[0].rstrip("/"), active_prof[1]) if active_prof else (api_url, None)
+                if not target_pid and profile_name:
+                    p_obj = find_gpm_profile(target_api, profile_name)
+                    if p_obj:
+                        target_pid = p_obj.get("id")
+                if target_pid:
+                    sr = requests.get(f"{target_api}/profiles/start/{target_pid}", timeout=8).json()
+                    raddr = (sr.get("data") or {}).get("remote_debugging_address")
+                    if raddr:
+                        if not raddr.startswith(("http://", "https://")):
+                            raddr = f"http://{raddr}"
+                        patch_playwright_driver()
+                        from playwright.sync_api import sync_playwright
+                        with sync_playwright() as p:
+                            br = p.chromium.connect_over_cdp(raddr, timeout=4000)
+                            if br.contexts:
+                                pgs = [pg for pg in br.contexts[0].pages if not pg.is_closed() and "chrome-extension://" not in pg.url.lower()]
+                                tab = next((pg for pg in pgs if "tiktok.com" in pg.url.lower()), pgs[0] if pgs else None)
+                                if tab:
+                                    snap = tab.evaluate("""() => ({
+                                        url: location.href.slice(0, 180),
+                                        title: document.title || '',
+                                        text: (document.body ? document.body.innerText : '').trim().slice(0, 900),
+                                        buttons: Array.from(document.querySelectorAll('button, input, [role="button"]')).slice(0, 20).map(e => ({
+                                            tag: e.tagName, type: e.type || '', text: (e.innerText || e.value || e.placeholder || '').trim().slice(0, 50)
+                                        }))
+                                    })""")
+                                    dom_summary = json.dumps(snap, ensure_ascii=False)
+            except Exception:
+                pass
+
+            prompt = (
+                f"Bạn đang bảo trì file `logacc.py` trong thư mục `{repo_dir}` (phiên bản hiện tại `{APP_VERSION}`).\n"
+                f"Yêu cầu sửa lỗi từ người dùng: {user_note.strip() or '(Tự phân tích từ Log và DOM bên dưới)'}\n\n"
+                f"=== 30 DÒNG LOG GẦN NHẤT ===\n{recent_logs}\n\n"
+                f"=== TRẠNG THÁI TAB GPM ĐANG MỞ ===\n{dom_summary}\n\n"
+                "Hãy thực hiện ĐÚNG các bước sau:\n"
+                "1. Tìm đúng chỗ bị lỗi hoặc thiếu selector/logic trong `logacc.py` và sửa thật gọn, chính xác.\n"
+                "2. Tăng `APP_VERSION` trong `logacc.py` lên 1 bậc (ví dụ 1.4.6 -> 1.4.7).\n"
+                "3. Chạy `python -m py_compile logacc.py` để kiểm tra cú pháp; nếu lỗi phải sửa hoặc `git checkout -- logacc.py`.\n"
+                "4. Copy `logacc.py` đè sang `log_acc.py` và `dist\\logacc_engine.py`, rồi chạy:\n"
+                "   `git add logacc.py log_acc.py && git commit -m \"AI auto-fix: <mô tả ngắn>\" && git push origin main`\n"
+                "5. Trả lời ngắn gọn bằng tiếng Việt những gì đã sửa và phiên bản mới."
+            )
+
+            try:
+                sig.emit("⏳ [Gemini Tự Sửa Code] AI đang đọc code, sửa lỗi và push bản mới (có thể mất 30–120s)...")
+                cmd = [
+                    agy_bin, "-p", prompt,
+                    "--mode", "auto",
+                    "--dangerously-skip-permissions",
+                    "--disable-slash-commands",
+                    "--print-timeout", "240s",
+                ]
+                res = subprocess.run(
+                    cmd, cwd=repo_dir, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=250
+                )
+                out_txt = (res.stdout or res.stderr or "").strip()
+                if res.returncode == 0 and out_txt:
+                    tail = "\n".join(out_txt.splitlines()[-8:])
+                    sig.emit(f"✅ [Gemini Tự Sửa Code HOÀN TẤT]:\n{tail}")
+                    sig.emit("🔄 Hãy bấm nút '🔄 CẬP NHẬT' trên tool để nạp ngay bản mới vừa được vá!")
+                else:
+                    sig.emit(f"⚠️ [Gemini Tự Sửa Code] Kết thúc (code={res.returncode}): {out_txt[-300:]}")
+            except Exception as ex:
+                sig.emit(f"❌ [Gemini Tự Sửa Code] Lỗi: {str(ex)[:150]}")
+
+        threading.Thread(target=_run_patch, daemon=True).start()
+
     def open_gemini_cli_login(self):
         """Hiển thị cấu hình AI Fallback (Antigravity CLI agy.exe tự động hoặc nhập Gemini API Key)."""
         installed, logged_in, detail = check_gemini_cli_auth_status()
@@ -7087,6 +7184,14 @@ class MainWindow(QWidget):
         btn_emergency.setStyleSheet("padding: 11px 14px; background-color: #d32f2f; color: white; font-weight: bold; border-radius: 4px; font-size: 10.5pt;")
         lay.addWidget(btn_emergency)
 
+        fix_note_input = QLineEdit()
+        fix_note_input.setPlaceholderText("Mô tả lỗi để AI tự sửa code & update (có thể để trống để AI tự đọc Log + GPM)")
+        lay.addWidget(fix_note_input)
+
+        btn_self_patch = QPushButton("🛠️ GEMINI TỰ SỬA CODE & ĐẨY BẢN UPDATE MỚI (Auto-Fix + Push GitHub)")
+        btn_self_patch.setStyleSheet("padding: 10px 14px; background-color: #ef6c00; color: white; font-weight: bold; border-radius: 4px;")
+        lay.addWidget(btn_self_patch)
+
         btn_row = QHBoxLayout()
         btn_save = QPushButton("💾 Lưu Cấu Hình")
         btn_save.setStyleSheet("padding: 8px 14px; background-color: #2e7d32; color: white; font-weight: bold; border-radius: 4px;")
@@ -7104,7 +7209,16 @@ class MainWindow(QWidget):
             dlg.accept()
             self.trigger_emergency_gemini_assist()
 
+        def _self_patch():
+            cfg = load_gui_config()
+            cfg["gemini_api_key"] = key_input.text().strip()
+            save_gui_config(cfg)
+            note = fix_note_input.text().strip()
+            dlg.accept()
+            self.trigger_gemini_self_patch(user_note=note)
+
         btn_emergency.clicked.connect(_emergency)
+        btn_self_patch.clicked.connect(_self_patch)
 
         def _save():
             cfg = load_gui_config()
