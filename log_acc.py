@@ -105,7 +105,7 @@ def global_exception_handler(exctype, value, tb):
 sys.excepthook = global_exception_handler
 
 # --- CẤU HÌNH PHIÊN BẢN & TỰ ĐỘNG CẬP NHẬT TỪ GITHUB ---
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.7"
 GITHUB_REPO_OWNER = "DungAnh1301"
 GITHUB_REPO_NAME = "logacc"
 GITHUB_FILE_PATH = "logacc.py"
@@ -3909,6 +3909,7 @@ class MainWindow(QWidget):
         self._pending_auto_az_gpm = False
         self._auto_advance_after_profile_update = False
         self.active_gpm_profile = None
+        self.account_gpm_map = {}
         self.global_stop_event = threading.Event()
         self.global_pause_event = threading.Event()
         self.global_pause_event.set()
@@ -4060,13 +4061,25 @@ class MainWindow(QWidget):
         recovery_layout.addWidget(self.btn_manage_recovery)
         main_layout.addLayout(recovery_layout)
 
-        # Ô 3: Tên profile GPM cần mở sau khi VPN đã kết nối thành công
+        # Ô 3: Tên profile GPM cần mở sau khi VPN đã kết nối thành công + Số nhảy + Nút Nạp gán GPM
         gpm_layout = QHBoxLayout()
         self.gpm_profile_input = QLineEdit()
         self.gpm_profile_input.setPlaceholderText("Ví dụ: SA-75-1")
         self.gpm_profile_input.setText("")
         self.gpm_profile_input.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 8px; border-radius: 4px; color: #ffcc80;")
-        
+
+        self.gpm_max_slot_spin = QSpinBox()
+        self.gpm_max_slot_spin.setRange(1, 99)
+        self.gpm_max_slot_spin.setValue(5)
+        self.gpm_max_slot_spin.setFixedWidth(56)
+        self.gpm_max_slot_spin.setToolTip("Số đuôi tối đa trước khi nhảy nhóm GPM (ví dụ điền 3: -1 → -2 → -3 rồi lên nhóm mới)")
+        self.gpm_max_slot_spin.setStyleSheet("background-color: #1e1e1e; border: 1px solid #333; padding: 6px; border-radius: 4px; color: #80cbc4; font-weight: bold;")
+
+        self.btn_bind_accounts_gpm = QPushButton("🔗 Nạp")
+        self.btn_bind_accounts_gpm.setStyleSheet("padding: 8px 12px; background-color: #0277bd; color: white; border-radius: 4px; font-weight: bold;")
+        self.btn_bind_accounts_gpm.setToolTip("Nạp danh sách tài khoản và định danh sẵn từng User/Email gắn với đúng Profile GPM theo số nhảy")
+        self.btn_bind_accounts_gpm.clicked.connect(self.bind_accounts_to_gpm_profiles)
+
         self.btn_bulk_create_gpm = QPushButton("⚡ Tạo Profile Auto")
         self.btn_bulk_create_gpm.setStyleSheet("padding: 8px 14px; background-color: #7b1fa2; color: white; border-radius: 4px; font-weight: bold;")
         self.btn_bulk_create_gpm.setToolTip("Mở công cụ tự động tạo profile GPM hàng loạt không cần bấm tay!")
@@ -4074,6 +4087,9 @@ class MainWindow(QWidget):
 
         gpm_layout.addWidget(QLabel("<b>Profile GPM:</b>"))
         gpm_layout.addWidget(self.gpm_profile_input, stretch=1)
+        gpm_layout.addWidget(QLabel("<b>Số nhảy:</b>"))
+        gpm_layout.addWidget(self.gpm_max_slot_spin)
+        gpm_layout.addWidget(self.btn_bind_accounts_gpm)
         gpm_layout.addWidget(self.btn_bulk_create_gpm)
         main_layout.addLayout(gpm_layout)
 
@@ -4283,6 +4299,7 @@ class MainWindow(QWidget):
         self.acc_input.textChanged.connect(self.save_settings_from_gui)
         self.recovery_combo.currentTextChanged.connect(self.save_settings_from_gui)
         self.gpm_profile_input.textChanged.connect(self.save_settings_from_gui)
+        self.gpm_max_slot_spin.valueChanged.connect(self.save_settings_from_gui)
         self.gpm_api_input.textChanged.connect(self.save_settings_from_gui)
         self.cb_change_nickname.toggled.connect(self.save_settings_from_gui)
         self.cb_change_avatar.toggled.connect(self.save_settings_from_gui)
@@ -4319,11 +4336,31 @@ class MainWindow(QWidget):
                     return c_acc
         return txt
 
+    def _get_mapped_gpm_for_raw(self, raw):
+        if not raw or not self.account_gpm_map:
+            return None
+        tk_user, _, em, _ = extract_tiktok_and_hotmail_creds(raw)
+        if em and em.lower() in self.account_gpm_map:
+            return self.account_gpm_map[em.lower()]
+        if tk_user and tk_user.lower() in self.account_gpm_map:
+            return self.account_gpm_map[tk_user.lower()]
+        return None
+
+    def _sync_gpm_for_account(self, raw):
+        mapped = self._get_mapped_gpm_for_raw(raw)
+        if mapped:
+            self.gpm_profile_input.blockSignals(True)
+            self.gpm_profile_input.setText(mapped)
+            self.gpm_profile_input.blockSignals(False)
+            return mapped
+        return None
+
     def on_acc_combo_index_changed(self, index):
         if index >= 0:
             raw = self.acc_combo.itemData(index)
             if raw:
                 QTimer.singleShot(0, lambda r=raw: self.acc_input.setText(r))
+                mapped_gpm = self._sync_gpm_for_account(raw)
                 self.save_settings_from_gui()
                 
                 # Tự động nạp kết quả đã lưu vào ô kết quả nếu tài khoản này đã có kết quả trong results.txt
@@ -4332,7 +4369,8 @@ class MainWindow(QWidget):
                     saved_res = find_result_by_email(em)
                     if saved_res:
                         self.result_output.setText(saved_res)
-                        self.log_output.append(f"🔍 [Lịch sử] Đã tự động nạp kết quả OAuth2 của {em} vào ô kết quả.")
+                        gpm_info = f" | GPM: {mapped_gpm}" if mapped_gpm else ""
+                        self.log_output.append(f"🔍 [Lịch sử] Đã tự động nạp kết quả OAuth2 của {em}{gpm_info} vào ô kết quả.")
                     else:
                         self.result_output.clear()
 
@@ -4366,7 +4404,9 @@ class MainWindow(QWidget):
                     user_prefix = f"[{parts[0]}] "
 
             if em:
-                display_text = f"{status_tag} {user_prefix}{em}"
+                mapped_gpm = self._get_mapped_gpm_for_raw(clean_acc)
+                gpm_tag = f"[{mapped_gpm}] " if mapped_gpm else ""
+                display_text = f"{status_tag} {gpm_tag}{user_prefix}{em}"
             else:
                 display_text = f"{status_tag} {clean_acc[:60]}..."
 
@@ -4411,6 +4451,7 @@ class MainWindow(QWidget):
             raw = self.acc_combo.itemData(cur_idx - 1)
             if raw:
                 self.acc_input.setText(raw)
+            mapped_gpm = self._sync_gpm_for_account(raw)
             em, _, _ = extract_email_and_password(raw or "")
             show_name = em or (raw[:40] if raw else "")
             if em:
@@ -4419,7 +4460,8 @@ class MainWindow(QWidget):
                     self.result_output.setText(saved_res)
                 else:
                     self.result_output.clear()
-            self.log_output.append(f"◀ [Tài khoản] Đã quay lại tài khoản trước ({cur_idx}/{self.acc_combo.count()}): {show_name}")
+            gpm_info = f" | GPM: {mapped_gpm}" if mapped_gpm else ""
+            self.log_output.append(f"◀ [Tài khoản] Đã quay lại tài khoản trước ({cur_idx}/{self.acc_combo.count()}): {show_name}{gpm_info}")
         else:
             self.log_output.append("ℹ️ Đang ở tài khoản đầu tiên trong danh sách.")
 
@@ -4431,6 +4473,7 @@ class MainWindow(QWidget):
             raw = self.acc_combo.itemData(cur_idx + 1)
             if raw:
                 self.acc_input.setText(raw)
+            mapped_gpm = self._sync_gpm_for_account(raw)
             em, _, _ = extract_email_and_password(raw or "")
             show_name = em or (raw[:40] if raw else "")
             if em:
@@ -4439,7 +4482,8 @@ class MainWindow(QWidget):
                     self.result_output.setText(saved_res)
                 else:
                     self.result_output.clear()
-            self.log_output.append(f"▶ [Tài khoản] Đã chuyển tới tài khoản tiếp theo ({cur_idx + 2}/{count}): {show_name}")
+            gpm_info = f" | GPM: {mapped_gpm}" if mapped_gpm else ""
+            self.log_output.append(f"▶ [Tài khoản] Đã chuyển tới tài khoản tiếp theo ({cur_idx + 2}/{count}): {show_name}{gpm_info}")
         else:
             self.log_output.append("ℹ️ Đang ở tài khoản cuối cùng trong danh sách.")
 
@@ -4447,13 +4491,14 @@ class MainWindow(QWidget):
         cur_idx = self.acc_combo.currentIndex()
         count = self.acc_combo.count()
         if count == 0:
-            return
+            return False
         next_idx = cur_idx + 1
         if next_idx < count:
             self.acc_combo.setCurrentIndex(next_idx)
             raw = self.acc_combo.itemData(next_idx)
             if raw:
                 self.acc_input.setText(raw)
+            mapped_gpm = self._sync_gpm_for_account(raw)
             em, _, _ = extract_email_and_password(raw or "")
             show_name = em or (raw[:40] if raw else "")
             if em:
@@ -4462,9 +4507,12 @@ class MainWindow(QWidget):
                     self.result_output.setText(saved_res)
                 else:
                     self.result_output.clear()
-            self.log_output.append(f"🔁 [Tài khoản tiếp theo] Đã tự động chuyển sang tài khoản ({next_idx + 1}/{count}): {show_name}")
+            gpm_info = f" | GPM: {mapped_gpm}" if mapped_gpm else ""
+            self.log_output.append(f"🔁 [Tài khoản tiếp theo] Đã tự động chuyển sang tài khoản ({next_idx + 1}/{count}): {show_name}{gpm_info}")
+            return bool(mapped_gpm)
         else:
             self.log_output.append(f"🏁 [Tài khoản] Đã hoàn thành duyệt hết {count} tài khoản trong danh sách!")
+            return False
 
     def open_target_accounts_dialog(self):
         dlg = TargetAccountsDialog(self)
@@ -4478,10 +4526,20 @@ class MainWindow(QWidget):
 
     def load_settings_to_gui(self):
         cfg = load_gui_config()
+        if cfg and isinstance(cfg.get("account_gpm_map"), dict):
+            self.account_gpm_map = {str(k).lower(): str(v) for k, v in cfg["account_gpm_map"].items() if k and v}
         saved_acc = cfg.get("acc_input") if cfg else None
         self.refresh_acc_combo(select_account=saved_acc)
         self.refresh_recovery_combo()
         if cfg:
+            if "gpm_max_slot" in cfg and cfg["gpm_max_slot"]:
+                try:
+                    val_slot = max(1, min(99, int(cfg["gpm_max_slot"])))
+                    self.gpm_max_slot_spin.blockSignals(True)
+                    self.gpm_max_slot_spin.setValue(val_slot)
+                    self.gpm_max_slot_spin.blockSignals(False)
+                except Exception:
+                    pass
             if "gpm_profile" in cfg and cfg["gpm_profile"]:
                 saved_p = str(cfg["gpm_profile"]).strip()
                 if saved_p and saved_p != "US-45-1":
@@ -4499,6 +4557,10 @@ class MainWindow(QWidget):
                     self.recovery_combo.setCurrentIndex(idx)
                 else:
                     self.recovery_combo.setEditText(rec)
+        # Nếu tài khoản đang chọn đã được gán GPM thì hiển thị đúng GPM đó
+        cur_raw = self.get_current_raw_account()
+        if cur_raw:
+            self._sync_gpm_for_account(cur_raw)
 
         # Nếu Profile GPM vẫn đang trống, tự động nhận diện profile có sẵn từ GPM API
         if not self.gpm_profile_input.text().strip():
@@ -4526,6 +4588,8 @@ class MainWindow(QWidget):
                 "acc_input": raw_acc,
                 "recovery_email": self.recovery_combo.currentText().strip(),
                 "gpm_profile": self.gpm_profile_input.text().strip(),
+                "gpm_max_slot": int(self.gpm_max_slot_spin.value()),
+                "account_gpm_map": self.account_gpm_map,
                 "gpm_api": self.gpm_api_input.text().strip(),
                 "cb_change_nickname": self.cb_change_nickname.isChecked(),
                 "cb_change_avatar": self.cb_change_avatar.isChecked()
@@ -5417,8 +5481,8 @@ class MainWindow(QWidget):
         """Tự động chuyển sang tài khoản tiếp theo & profile GPM tiếp theo khi đăng nhập thành công."""
         if self.global_stop_event.is_set():
             return
-        self.advance_target_account()
-        self.advance_gpm_profile()
+        if not self.advance_target_account():
+            self.advance_gpm_profile()
 
     def _finish_tiktok_post_login(self, target_tab, browser, target, api_url, already_logged_in, auto_advance=False):
         """Xử lý sau khi đăng nhập TikTok: tắt tiếng, đổi Tên/Avatar (nếu tích) hoặc đóng GPM + tắt VPN + sang nick mới."""
@@ -6603,33 +6667,76 @@ class MainWindow(QWidget):
         except Exception as err:
             self.log_output.append(f"❌ [Lỗi giao diện]: {str(err)}")
 
+    def _compute_next_gpm_profile(self, current, max_slot=None):
+        """Tính tên profile GPM kế tiếp theo số nhảy (ví dụ max_slot=3: PK-127-1 -> PK-127-2 -> PK-127-3 -> PK-128-1)."""
+        match = re.fullmatch(r"(.+)-(\d+)-(\d+)", (current or "").strip())
+        if not match:
+            return None
+        prefix, group_text, slot_text = match.groups()
+        group_number = int(group_text)
+        slot_number = int(slot_text)
+        limit = max(1, int(max_slot if max_slot is not None else self.gpm_max_slot_spin.value()))
+        if slot_number < limit:
+            return f"{prefix}-{group_text}-{slot_number + 1}"
+        next_group = str(group_number + 1).zfill(len(group_text))
+        return f"{prefix}-{next_group}-1"
+
+    def bind_accounts_to_gpm_profiles(self):
+        """Nạp danh sách tài khoản và định danh sẵn từng user/email gắn với đúng số Profile GPM theo số nhảy."""
+        start_profile = self.gpm_profile_input.text().strip()
+        if not re.fullmatch(r"(.+)-(\d+)-(\d+)", start_profile):
+            self.log_output.append("⚠️ Vui lòng nhập Profile GPM mở đầu đúng định dạng (ví dụ: PK-127-1) trước khi bấm Nạp!")
+            return
+        accounts = load_target_accounts()
+        if not accounts:
+            self.log_output.append("⚠️ Danh sách tài khoản (target_accounts.txt) đang trống!")
+            return
+
+        max_slot = int(self.gpm_max_slot_spin.value())
+        new_map = {}
+        cur_prof = start_profile
+        preview_lines = []
+
+        for idx, acc in enumerate(accounts):
+            clean_acc = clean_account_string(acc)
+            tk_user, _, em, _ = extract_tiktok_and_hotmail_creds(clean_acc)
+            if em:
+                new_map[em.lower()] = cur_prof
+            if tk_user:
+                new_map[tk_user.lower()] = cur_prof
+            label = tk_user or em or f"TK #{idx+1}"
+            if idx < 5 or idx >= len(accounts) - 2:
+                preview_lines.append(f"  • {label} ({em or ''}) → {cur_prof}")
+            elif idx == 5:
+                preview_lines.append("  • ...")
+            cur_prof = self._compute_next_gpm_profile(cur_prof, max_slot=max_slot) or cur_prof
+
+        self.account_gpm_map = new_map
+        cur_raw = self.get_current_raw_account()
+        self.refresh_acc_combo(select_account=cur_raw, prefer_first_if_missing=True)
+        if cur_raw:
+            self._sync_gpm_for_account(cur_raw)
+        self.save_settings_from_gui()
+
+        self.log_output.append(
+            f"🔗 [Nạp & Gán GPM] Đã định danh {len(accounts)} tài khoản từ '{start_profile}' (Số nhảy: {max_slot}):\n"
+            + "\n".join(preview_lines)
+        )
+
     def advance_gpm_profile(self):
-        """Ví dụ SA-75-1 ... SA-75-5 -> SA-76-1; luôn đọc giá trị hiện tại trên GUI."""
+        """Tăng số profile GPM theo ô Số nhảy đã lưu (mặc định lần đầu 5, chỉnh xong lưu vĩnh viễn)."""
         current = self.gpm_profile_input.text().strip()
         if not current:
             return
-        match = re.fullmatch(r"(.+)-(\d+)-(\d+)", current)
-        if not match:
+        max_slot = int(self.gpm_max_slot_spin.value())
+        next_profile = self._compute_next_gpm_profile(current, max_slot=max_slot)
+        if not next_profile:
             self.log_output.append(
                 f"⚠️ Không tăng profile '{current}': cần định dạng như SA-75-1."
             )
             return
-
-        prefix, group_text, slot_text = match.groups()
-        group_number = int(group_text)
-        slot_number = int(slot_text)
-        if slot_number < 1 or slot_number > 5:
-            self.log_output.append("⚠️ Số cuối profile phải nằm trong khoảng 1 đến 5.")
-            return
-
-        if slot_number < 5:
-            next_profile = f"{prefix}-{group_text}-{slot_number + 1}"
-        else:
-            next_group = str(group_number + 1).zfill(len(group_text))
-            next_profile = f"{prefix}-{next_group}-1"
-
         self.gpm_profile_input.setText(next_profile)
-        self.log_output.append(f"🔁 Profile kế tiếp: {current} → {next_profile}")
+        self.log_output.append(f"🔁 Profile kế tiếp (nhảy {max_slot}): {current} → {next_profile}")
 
 
     def start_auto_az_process(self):
@@ -6830,9 +6937,9 @@ class MainWindow(QWidget):
                 self.background_log_signal.emit(f"⚠️ [VPN] Không thể ngắt VPN tự động: {str(e)}")
         threading.Thread(target=_disconnect_vpn, daemon=True).start()
 
-        # Tự động chuyển sang tài khoản tiếp theo trong danh sách và profile GPM tiếp theo khi bấm STOP
-        self.advance_target_account()
-        self.advance_gpm_profile()
+        # Tự động chuyển sang tài khoản tiếp theo trong danh sách và profile GPM tương ứng khi bấm STOP
+        if not self.advance_target_account():
+            self.advance_gpm_profile()
 
     def copy_result(self):
         text_to_copy = self.result_output.text().strip()
